@@ -24,6 +24,7 @@ def health_check():
     summary="Probe certificate authentication against AUT2000 without generating CAF",
 )
 async def probe_auth(request: ProbeAuthRequest):
+    client = None
     try:
         client = SiiClient(
             pfx_base64=request.pfx_base64,
@@ -31,11 +32,11 @@ async def probe_auth(request: ProbeAuthRequest):
             environment=request.environment,
         )
         message = await client.probe_auth()
-        return ProbeAuthResponse(success=True, message=message)
+        return ProbeAuthResponse(success=True, message=message, trace=client.logs)
     except SiiException as e:
-        return ProbeAuthResponse(success=False, message=f"{e.code}: {e.message}")
+        return ProbeAuthResponse(success=False, message=f"{e.code}: {e.message}", trace=client.logs if client else [])
     except Exception as e:
-        return ProbeAuthResponse(success=False, message=f"Unexpected error: {str(e)}")
+        return ProbeAuthResponse(success=False, message=f"Unexpected error: {str(e)}", trace=client.logs if client else [])
 
 
 @app.post(
@@ -45,6 +46,7 @@ async def probe_auth(request: ProbeAuthRequest):
     summary="Request and download CAF folios from SII portal",
 )
 async def request_folios(request: FolioRequest):
+    client = None
     try:
         client = SiiClient(
             pfx_base64=request.pfx_base64,
@@ -61,18 +63,21 @@ async def request_folios(request: FolioRequest):
             success=True,
             caf_xml=caf_xml,
             message="Folios retrieved successfully",
+            trace=client.logs
         )
     except SiiException as e:
         return FolioResponse(
             success=False,
             error_code=e.code,
             message=e.message,
+            trace=client.logs if client else []
         )
     except Exception as e:
         return FolioResponse(
             success=False,
             error_code="SII_FOLIO_UNEXPECTED_ERROR",
             message=f"Unexpected error: {str(e)}",
+            trace=client.logs if client else []
         )
 
 

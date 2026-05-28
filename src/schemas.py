@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, List
 
 
 class ProbeAuthRequest(BaseModel):
@@ -12,6 +12,7 @@ class ProbeAuthResponse(BaseModel):
     success: bool
     token: Optional[str] = None
     message: str
+    trace: Optional[List[str]] = Field(None, description="The scraping trace log lines")
 
 
 class FolioRequest(BaseModel):
@@ -29,3 +30,4 @@ class FolioResponse(BaseModel):
     caf_xml: Optional[str] = Field(None, description="The returned CAF XML string if successful")
     error_code: Optional[str] = Field(None, description="Error code if request failed")
     message: str
+    trace: Optional[List[str]] = Field(None, description="The scraping trace log lines")

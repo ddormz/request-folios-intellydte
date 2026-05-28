@@ -86,6 +86,9 @@ def is_blocked_sii_page(html_body: str) -> bool:
     # Look for Imperva or classic WAF block signatures
     if "requested URL was rejected" in html_body or "Support ID" in html_body:
         return True
+    lowered = html_body.lower()
+    if "transaccion rechazada" in lowered or "mesa de ayuda" in lowered:
+        return True
     if "imperva" in html_body.lower() or "incapsula" in html_body.lower():
         return True
     return False
@@ -96,7 +99,46 @@ def extract_support_id(html_body: str) -> Optional[str]:
     match = re.search(r"Support ID:\s*([0-9a-zA-Z\-]+)", html_body, re.IGNORECASE)
     if match:
         return match.group(1).strip()
+
+    match = re.search(r"(?:ID|supportId)\s*[:=]\s*([0-9]{6,})", html_body, re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+
     return None
+
+
+def extract_login_reference(current_url: str, html_body: str, fallback: Optional[str] = None) -> str:
+    """Extracts the AUT2000 reference from Zeus query string, hidden inputs, or inline JS."""
+    parsed_url = urllib.parse.urlparse(str(current_url))
+    raw_query = parsed_url.query or ""
+
+    if raw_query.startswith("http"):
+        return urllib.parse.unquote(raw_query)
+
+    query_params = urllib.parse.parse_qs(raw_query)
+    reference = query_params.get("referencia", [""])[0].strip()
+    if reference:
+        return urllib.parse.unquote(reference)
+
+    patterns = [
+        r'name=["\']referencia["\']\s+[^>]*value=["\']([^"\']+)["\']',
+        r'value=["\']([^"\']+)["\']\s+[^>]*name=["\']referencia["\']',
+        r'referencia\s*=\s*["\']([^"\']+)["\']',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, html_body, re.IGNORECASE)
+        if match:
+            candidate = match.group(1).strip()
+            if candidate:
+                return urllib.parse.unquote(candidate)
+
+    if fallback:
+        return fallback
+
+    raise SiiException(
+        "SII_FOLIO_PORTAL_AUTH_LOOP",
+        "Could not extract 'referencia' parameter from login page.",
+    )
 
 
 def classify_certificate_auth_failure(html_body: str) -> str:
@@ -305,23 +347,10 @@ class SiiClient:
             if is_certificate_auth_page(response.url, response.text):
                 self.log(f"[sii-client] [{self.environment}] Login redirection detected (CAutInicio.cgi).")
                 # We need to perform the POST login
-                parsed_url = urllib.parse.urlparse(str(response.url))
-                query_params = urllib.parse.parse_qs(parsed_url.query)
-                reference = query_params.get("referencia", [""])[0]
-
-                if not reference:
-                    # Parse reference from html
-                    ref_match = re.search(r'name="referencia"\s+value="([^"]+)"', response.text)
-                    if ref_match:
-                        reference = ref_match.group(1)
-                    else:
-                        raise SiiException(
-                            "SII_FOLIO_PORTAL_AUTH_LOOP",
-                            "Could not extract 'referencia' query parameter from the SII certificate login page",
-                        )
+                reference = extract_login_reference(str(response.url), response.text, fallback=entry_url)
 
                 self.log(f"[sii-client] [{self.environment}] Reference extracted: {reference}. Performing POST certificate login...")
-                login_url = f"{CERT_AUTH_URL}?referencia={urllib.parse.quote(reference)}"
+                login_url = f"{CERT_AUTH_URL}?{reference}"
                 login_response = await client.post(
                     login_url,
                     data={"referencia": reference},
@@ -370,22 +399,10 @@ class SiiClient:
             # 1. Handle certificate authentication if redirected
             if is_certificate_auth_page(current_resp.url, current_resp.text):
                 self.log(f"[sii-client] [{self.environment}] Redirection to AUT2000 login detected. Starting handshake...")
-                parsed_url = urllib.parse.urlparse(str(current_resp.url))
-                query_params = urllib.parse.parse_qs(parsed_url.query)
-                reference = query_params.get("referencia", [""])[0]
-
-                if not reference:
-                    ref_match = re.search(r'name="referencia"\s+value="([^"]+)"', current_resp.text)
-                    if ref_match:
-                        reference = ref_match.group(1)
-                    else:
-                        raise SiiException(
-                            "SII_FOLIO_PORTAL_AUTH_LOOP",
-                            "Could not extract 'referencia' parameter from login page.",
-                        )
+                reference = extract_login_reference(str(current_resp.url), current_resp.text, fallback=entry_url)
 
                 self.log(f"[sii-client] [{self.environment}] Reference extracted: {reference}. Performing POST certificate login...")
-                login_url = f"{CERT_AUTH_URL}?referencia={urllib.parse.quote(reference)}"
+                login_url = f"{CERT_AUTH_URL}?{reference}"
                 
                 # Add human-like pacing delay before certificate login POST
                 login_delay = random.uniform(0.8, 1.6)

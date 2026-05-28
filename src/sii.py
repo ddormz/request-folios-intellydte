@@ -124,6 +124,32 @@ def classify_certificate_auth_failure(html_body: str) -> str:
     return "SII_FOLIO_PORTAL_AUTH_LOOP"
 
 
+def is_certificate_auth_page(url: str, html_body: str) -> bool:
+    """Checks if the current page is the certificate authentication page."""
+    url_str = str(url)
+    if "cgi_AUT2000/CAutInicio.cgi" in url_str:
+        return True
+    
+    text_lower = html_body.lower()
+    # Check if we have the specific form tag action for CAutInicio
+    if "cautinicio.cgi" in text_lower:
+        return True
+        
+    # Check if it has the specific digital certificate authentication keywords
+    has_auth_kw = any(x in text_lower for x in ["ingresocertificado", "certificado digital", "autenticacion", "autenticación"])
+    
+    # Must have the reference input element and authentication keywords
+    has_ref_input = ('name="referencia"' in html_body or 
+                     'name=\'referencia\'' in html_body or 
+                     'type="hidden" name="referencia"' in text_lower or
+                     'type=\'hidden\' name=\'referencia\'' in text_lower)
+                     
+    if has_auth_kw and has_ref_input:
+        return True
+        
+    return False
+
+
 class SiiClient:
     def __init__(
         self,
@@ -276,7 +302,7 @@ class SiiClient:
             response = await client.get(entry_url, headers={"Referer": "https://www.sii.cl/"})
 
             # Check if we were served the certificate login page
-            if "cgi_AUT2000/CAutInicio.cgi" in str(response.url) or "referencia" in response.text:
+            if is_certificate_auth_page(response.url, response.text):
                 self.log(f"[sii-client] [{self.environment}] Login redirection detected (CAutInicio.cgi).")
                 # We need to perform the POST login
                 parsed_url = urllib.parse.urlparse(str(response.url))
@@ -313,7 +339,7 @@ class SiiClient:
                 final_url = str(response.url)
 
             # Check if login was successful
-            if "cgi_AUT2000/CAutInicio.cgi" in final_url or "referencia" in final_html:
+            if is_certificate_auth_page(final_url, final_html):
                 self.log(f"[sii-client] [{self.environment}] ERROR: Landing page still shows login fields. AUT2000 rejected the certificate.")
                 err_code = classify_certificate_auth_failure(final_html)
                 raise SiiException(
@@ -342,7 +368,7 @@ class SiiClient:
             current_resp = await client.get(entry_url, headers={"Referer": "https://www.sii.cl/"})
 
             # 1. Handle certificate authentication if redirected
-            if "cgi_AUT2000/CAutInicio.cgi" in str(current_resp.url) or "referencia" in current_resp.text:
+            if is_certificate_auth_page(current_resp.url, current_resp.text):
                 self.log(f"[sii-client] [{self.environment}] Redirection to AUT2000 login detected. Starting handshake...")
                 parsed_url = urllib.parse.urlparse(str(current_resp.url))
                 query_params = urllib.parse.parse_qs(parsed_url.query)
@@ -377,7 +403,7 @@ class SiiClient:
                 current_resp = retry_resp
 
             # Check if auth failed
-            if "cgi_AUT2000/CAutInicio.cgi" in str(current_resp.url) or "referencia" in current_resp.text:
+            if is_certificate_auth_page(current_resp.url, current_resp.text):
                 self.log(f"[sii-client] [{self.environment}] ERROR: Landing page still shows login fields. Handshake failed.")
                 err_code = classify_certificate_auth_failure(current_resp.text)
                 raise SiiException(err_code, f"AUT2000 Authentication failed during folio wizard: {err_code}")

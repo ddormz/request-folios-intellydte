@@ -237,14 +237,18 @@ class SiiClient:
 
     async def probe_auth(self) -> str:
         """Tests the AUT2000 login without executing the folio wizard."""
+        print(f"[sii-client] [{self.environment}] Starting certificate authentication probe against AUT2000...")
         async with self._create_client() as client:
+            print(f"[sii-client] [{self.environment}] Warming up session with standard requests...")
             await self.warmup(client)
 
             entry_url = f"{self.base_url}{FOLIO_PATH}"
+            print(f"[sii-client] [{self.environment}] Navigating to entry URL: {entry_url}")
             response = await client.get(entry_url, headers={"Referer": "https://www.sii.cl/"})
 
             # Check if we were served the certificate login page
             if "cgi_AUT2000/CAutInicio.cgi" in str(response.url) or "referencia" in response.text:
+                print(f"[sii-client] [{self.environment}] Login redirection detected (CAutInicio.cgi).")
                 # We need to perform the POST login
                 parsed_url = urllib.parse.urlparse(str(response.url))
                 query_params = urllib.parse.parse_qs(parsed_url.query)
@@ -261,6 +265,7 @@ class SiiClient:
                             "Could not extract 'referencia' query parameter from the SII certificate login page",
                         )
 
+                print(f"[sii-client] [{self.environment}] Reference extracted: {reference}. Performing POST certificate login...")
                 login_url = f"{CERT_AUTH_URL}?referencia={urllib.parse.quote(reference)}"
                 login_response = await client.post(
                     login_url,
@@ -268,22 +273,26 @@ class SiiClient:
                     headers={"Referer": str(response.url)},
                 )
 
+                print(f"[sii-client] [{self.environment}] Certificate login POST submitted. Re-accessing entry URL...")
                 # Check retry
                 retry_response = await client.get(entry_url, headers={"Referer": str(login_response.url)})
                 final_html = retry_response.text
                 final_url = str(retry_response.url)
             else:
+                print(f"[sii-client] [{self.environment}] Already authenticated. No redirection to login page required.")
                 final_html = response.text
                 final_url = str(response.url)
 
             # Check if login was successful
             if "cgi_AUT2000/CAutInicio.cgi" in final_url or "referencia" in final_html:
+                print(f"[sii-client] [{self.environment}] ERROR: Landing page still shows login fields. AUT2000 rejected the certificate.")
                 err_code = classify_certificate_auth_failure(final_html)
                 raise SiiException(
                     err_code,
                     "AUT2000 rejected the certificate; the certificate may be invalid, expired, or not authorized.",
                 )
 
+            print(f"[sii-client] [{self.environment}] Success: AUT2000 authentication verified.")
             return "Authentication verified successfully!"
 
     async def request_folios(
@@ -294,14 +303,18 @@ class SiiClient:
         amount: int,
     ) -> str:
         """Executes the full wizard flow to request and download folios (CAF XML)."""
+        print(f"[sii-client] [{self.environment}] Starting automated CAF request: Sender={rut_sender}, Company={rut_company}, DTE={document_type}, Qty={amount}")
         async with self._create_client() as client:
+            print(f"[sii-client] [{self.environment}] Warming up session with standard requests...")
             await self.warmup(client)
 
             entry_url = f"{self.base_url}{FOLIO_PATH}"
+            print(f"[sii-client] [{self.environment}] Navigating to folio wizard entry URL: {entry_url}")
             current_resp = await client.get(entry_url, headers={"Referer": "https://www.sii.cl/"})
 
             # 1. Handle certificate authentication if redirected
             if "cgi_AUT2000/CAutInicio.cgi" in str(current_resp.url) or "referencia" in current_resp.text:
+                print(f"[sii-client] [{self.environment}] Redirection to AUT2000 login detected. Starting handshake...")
                 parsed_url = urllib.parse.urlparse(str(current_resp.url))
                 query_params = urllib.parse.parse_qs(parsed_url.query)
                 reference = query_params.get("referencia", [""])[0]
@@ -316,6 +329,7 @@ class SiiClient:
                             "Could not extract 'referencia' parameter from login page.",
                         )
 
+                print(f"[sii-client] [{self.environment}] Reference extracted: {reference}. Performing POST certificate login...")
                 login_url = f"{CERT_AUTH_URL}?referencia={urllib.parse.quote(reference)}"
                 login_resp = await client.post(
                     login_url,
@@ -323,24 +337,29 @@ class SiiClient:
                     headers={"Referer": str(current_resp.url)},
                 )
 
+                print(f"[sii-client] [{self.environment}] Certificate login submitted. Re-accessing entry URL...")
                 retry_resp = await client.get(entry_url, headers={"Referer": str(login_resp.url)})
                 current_resp = retry_resp
 
             # Check if auth failed
             if "cgi_AUT2000/CAutInicio.cgi" in str(current_resp.url) or "referencia" in current_resp.text:
+                print(f"[sii-client] [{self.environment}] ERROR: Landing page still shows login fields. Handshake failed.")
                 err_code = classify_certificate_auth_failure(current_resp.text)
                 raise SiiException(err_code, f"AUT2000 Authentication failed during folio wizard: {err_code}")
 
+            print(f"[sii-client] [{self.environment}] Handshake successful. Navigating the folio wizard steps...")
             # Clean company RUT
             company_body, company_dv = clean_rut(rut_company)
 
             # 2. Iterate through forms steps to request CAF
             for step in range(12):  # Maximum form steps
                 html = current_resp.text
+                print(f"[sii-client] [{self.environment}] [Step {step}] Landed on URL: {current_resp.url}")
 
                 # Check if WAF blocked us
                 if is_blocked_sii_page(html):
                     support_id = extract_support_id(html)
+                    print(f"[sii-client] [{self.environment}] [Step {step}] ERROR: WAF Block page detected! Support ID: {support_id or 'unknown'}")
                     raise SiiException(
                         "SII_FOLIO_REQUEST_BLOCKED",
                         f"Request was blocked by SII classic portal. Support ID: {support_id or 'unknown'}",
@@ -349,11 +368,14 @@ class SiiClient:
                 # Check if we have successfully obtained the CAF XML
                 caf_xml = extract_caf_xml(html)
                 if caf_xml:
+                    print(f"[sii-client] [{self.environment}] [Step {step}] SUCCESS! CAF XML extracted: {len(caf_xml)} bytes.")
                     return caf_xml
 
                 # Parse the forms in the page
                 forms = self._parse_html_forms(html)
+                print(f"[sii-client] [{self.environment}] [Step {step}] Parsed {len(forms)} HTML form(s) on the page.")
                 if not forms:
+                    print(f"[sii-client] [{self.environment}] [Step {step}] ERROR: No usable forms found on the page. HTML preview: {html[:600]}")
                     raise SiiException(
                         "SII_FOLIO_FORM_NOT_FOUND",
                         f"No usable form found in page. Step {step}. Excerpt: {html[:800]}",
@@ -362,6 +384,7 @@ class SiiClient:
                 # Select best form
                 selected_form = self._pick_form(forms, str(current_resp.url), document_type)
                 if not selected_form:
+                    print(f"[sii-client] [{self.environment}] [Step {step}] No specific wizard form matched. Falling back to the first available form.")
                     # Try first form
                     selected_form = forms[0]
 
@@ -390,6 +413,9 @@ class SiiClient:
                 action = selected_form["action"] or ""
                 action_url = urllib.parse.urljoin(str(current_resp.url), action)
 
+                print(f"[sii-client] [{self.environment}] [Step {step}] Submitting {selected_form['method']} to {action_url}")
+                print(f"[sii-client] [{self.environment}] [Step {step}] Form fields: {list(fields.keys())}")
+
                 # Submit form
                 if selected_form["method"] == "POST":
                     current_resp = await client.post(
@@ -405,6 +431,7 @@ class SiiClient:
                     )
 
             # If we reached the step limit without CAF
+            print(f"[sii-client] [{self.environment}] ERROR: Exceeded step limit (12 steps) without extracting CAF XML.")
             raise SiiException(
                 "SII_FOLIO_FORM_FLOW_LIMIT",
                 "Exceeded maximum form wizard steps without retrieving CAF XML.",

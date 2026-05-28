@@ -7,8 +7,35 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
 
+CERT_FILES = (
+    "ca.key",
+    "ca.crt",
+    "server.key",
+    "server.crt",
+    "client.key",
+    "client.crt",
+)
+
+
+def should_force_regenerate() -> bool:
+    return os.getenv("FORCE_REGENERATE_CERTS", "false").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def cert_paths(output_dir: str) -> list[str]:
+    return [os.path.join(output_dir, filename) for filename in CERT_FILES]
+
+
+def cert_bundle_exists(output_dir: str) -> bool:
+    return all(os.path.exists(path) for path in cert_paths(output_dir))
+
+
 def generate_certs(output_dir="certs"):
     os.makedirs(output_dir, exist_ok=True)
+
+    if cert_bundle_exists(output_dir) and not should_force_regenerate():
+        print(f"Certificates already exist in directory: {output_dir}. Skipping regeneration.")
+        return
+
     print(f"Generating certificates in directory: {output_dir}")
 
     # 1. Generate CA Key and Certificate

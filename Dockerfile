@@ -45,5 +45,5 @@ ENV HOST=0.0.0.0
 ENV PORT=8000
 ENV PYTHONPATH=.
 
-# By default, generate certificates on startup if they don't exist, then start runner with mTLS
+# By default, keep existing certs stable across restarts and only generate them when missing.
 CMD ["/bin/sh", "-c", "python scripts/generate_certs.py && python runner.py"]

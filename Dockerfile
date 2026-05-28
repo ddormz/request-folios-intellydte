@@ -25,7 +25,7 @@ WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libxml2 \
-    libxslt \
+    libxslt1.1 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /app/venv /app/venv
@@ -46,4 +46,4 @@ ENV PORT=8000
 ENV PYTHONPATH=.
 
 # By default, generate certificates on startup if they don't exist, then start runner with mTLS
-CMD python scripts/generate_certs.py && python runner.py
+CMD ["/bin/sh", "-c", "python scripts/generate_certs.py && python runner.py"]

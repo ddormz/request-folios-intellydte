@@ -1,6 +1,9 @@
+import asyncio
 import base64
 import os
+import random
 import re
+import ssl
 import tempfile
 import urllib.parse
 from typing import Dict, List, Optional, Tuple
@@ -199,9 +202,6 @@ class SiiClient:
 
     def _create_client(self) -> httpx.AsyncClient:
         """Creates an httpx.AsyncClient pre-configured with client certs and Chrome-like TLS configuration."""
-        # TLS client certificate tuple
-        cert_config = (self.cert_path, self.key_path)
-
         headers = {
             "User-Agent": USER_AGENT,
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
@@ -218,10 +218,34 @@ class SiiClient:
             "Sec-Fetch-User": "?1",
         }
 
-        # Verification of SII server certs is set to false to mirror Node's flexible/fallback options
+        # Create custom SSL context configured to mimic Chrome's secure handshakes
+        ssl_context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE  # equivalent to verify=False
+        
+        # Load custom client certificates for mTLS authentication
+        ssl_context.load_cert_chain(certfile=self.cert_path, keyfile=self.key_path)
+
+        # Set modern Chrome-like secure cipher suites to reduce TLS fingerprint mismatch on WAF
+        ssl_context.set_ciphers(
+            "ECDHE-ECDSA-AES128-GCM-SHA256:"
+            "ECDHE-RSA-AES128-GCM-SHA256:"
+            "ECDHE-ECDSA-AES256-GCM-SHA384:"
+            "ECDHE-RSA-AES256-GCM-SHA384:"
+            "ECDHE-ECDSA-CHACHA20-POLY1305:"
+            "ECDHE-RSA-CHACHA20-POLY1305"
+        )
+        
+        # Enforce high-security TLS protocols only (TLS 1.2 and TLS 1.3)
+        ssl_context.options |= ssl.OP_NO_SSLv2
+        ssl_context.options |= ssl.OP_NO_SSLv3
+        ssl_context.options |= ssl.OP_NO_TLSv1
+        ssl_context.options |= ssl.OP_NO_TLSv1_1
+
+        transport = httpx.AsyncHTTPTransport(verify=ssl_context)
+
         return httpx.AsyncClient(
-            cert=cert_config,
-            verify=False,  # Skip server validation to prevent SSL handshake errors on maullin/palena
+            transport=transport,
             headers=headers,
             follow_redirects=True,
             timeout=30.0,
@@ -336,6 +360,12 @@ class SiiClient:
 
                 self.log(f"[sii-client] [{self.environment}] Reference extracted: {reference}. Performing POST certificate login...")
                 login_url = f"{CERT_AUTH_URL}?referencia={urllib.parse.quote(reference)}"
+                
+                # Add human-like pacing delay before certificate login POST
+                login_delay = random.uniform(0.8, 1.6)
+                self.log(f"[sii-client] [{self.environment}] Pausing for {login_delay:.2f}s to simulate human certificate selection delay...")
+                await asyncio.sleep(login_delay)
+
                 login_resp = await client.post(
                     login_url,
                     data={"referencia": reference},
@@ -420,6 +450,11 @@ class SiiClient:
 
                 self.log(f"[sii-client] [{self.environment}] [Step {step}] Submitting {selected_form['method']} to {action_url}")
                 self.log(f"[sii-client] [{self.environment}] [Step {step}] Form fields: {list(fields.keys())}")
+
+                # Submit form with randomized human-like pacing delay
+                delay = random.uniform(0.65, 1.45)
+                self.log(f"[sii-client] [{self.environment}] [Step {step}] Pausing for {delay:.2f}s to simulate human navigation pacing...")
+                await asyncio.sleep(delay)
 
                 # Submit form
                 if selected_form["method"] == "POST":

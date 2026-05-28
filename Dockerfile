@@ -34,16 +34,17 @@ ENV PATH="/app/venv/bin:$PATH"
 # Copy source code and scripts
 COPY src/ ./src/
 COPY runner.py .
-COPY scripts/ ./scripts/
 
-# Create certs directory and set permissions
-RUN mkdir -p certs && chmod 700 certs
+# Create certs directory (only used when MTLS_ENABLED=true)
+RUN mkdir -p certs
 
 EXPOSE 8000
 
 ENV HOST=0.0.0.0
 ENV PORT=8000
 ENV PYTHONPATH=.
+ENV MTLS_ENABLED=false
 
-# By default, keep existing certs stable across restarts and only generate them when missing.
-CMD ["/bin/sh", "-c", "python scripts/generate_certs.py && python runner.py"]
+# Default: start in HTTP mode (internal network, Bearer token auth).
+# To enable mTLS, set MTLS_ENABLED=true and mount certs/ volume.
+CMD ["python", "runner.py"]

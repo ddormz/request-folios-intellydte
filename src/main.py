@@ -2,7 +2,7 @@ import uvicorn
 from fastapi import FastAPI, Depends, HTTPException, status
 from src.config import settings
 from src.auth import verify_token
-from src.schemas import ProbeAuthRequest, ProbeAuthResponse, FolioRequest, FolioResponse
+from src.schemas import ProbeAuthRequest, ProbeAuthResponse, FolioRequest, FolioResponse, AvailabilityRequest, AvailabilityResponse
 from src.sii import SiiClient, SiiException
 
 app = FastAPI(
@@ -63,21 +63,85 @@ async def request_folios(request: FolioRequest):
             success=True,
             caf_xml=caf_xml,
             message="Folios retrieved successfully",
-            trace=client.logs
+            trace=client.logs,
+            unused_folios=client.unused_folios,
+            max_authorized=client.max_authorized,
+            last_range_start=client.last_range_start,
+            last_range_end=client.last_range_end,
         )
     except SiiException as e:
         return FolioResponse(
             success=False,
             error_code=e.code,
             message=e.message,
-            trace=client.logs if client else []
+            trace=client.logs if client else [],
+            unused_folios=client.unused_folios if client else None,
+            max_authorized=client.max_authorized if client else None,
+            last_range_start=client.last_range_start if client else None,
+            last_range_end=client.last_range_end if client else None,
         )
     except Exception as e:
         return FolioResponse(
             success=False,
             error_code="SII_FOLIO_UNEXPECTED_ERROR",
             message=f"Unexpected error: {str(e)}",
-            trace=client.logs if client else []
+            trace=client.logs if client else [],
+            unused_folios=client.unused_folios if client else None,
+            max_authorized=client.max_authorized if client else None,
+            last_range_start=client.last_range_start if client else None,
+            last_range_end=client.last_range_end if client else None,
+        )
+
+
+@app.post(
+    "/api/v1/folios/check-availability",
+    response_model=AvailabilityResponse,
+    dependencies=[Depends(verify_token)],
+    summary="Check folio limits and unused counts from SII portal without generating a CAF",
+)
+async def check_availability(request: AvailabilityRequest):
+    client = None
+    try:
+        client = SiiClient(
+            pfx_base64=request.pfx_base64,
+            pfx_password=request.pfx_password,
+            environment=request.environment,
+        )
+        info = await client.check_availability(
+            rut_sender=request.rut_sender,
+            rut_company=request.rut_company,
+            document_type=request.document_type,
+        )
+        return AvailabilityResponse(
+            success=True,
+            unused_folios=info.get("unused_folios"),
+            max_authorized=info.get("max_authorized"),
+            last_range_start=info.get("last_range_start"),
+            last_range_end=info.get("last_range_end"),
+            message="Folio availability retrieved successfully",
+            trace=client.logs,
+        )
+    except SiiException as e:
+        return AvailabilityResponse(
+            success=False,
+            error_code=e.code,
+            message=e.message,
+            trace=client.logs if client else [],
+            unused_folios=client.unused_folios if client else None,
+            max_authorized=client.max_authorized if client else None,
+            last_range_start=client.last_range_start if client else None,
+            last_range_end=client.last_range_end if client else None,
+        )
+    except Exception as e:
+        return AvailabilityResponse(
+            success=False,
+            error_code="SII_FOLIO_UNEXPECTED_ERROR",
+            message=f"Unexpected error: {str(e)}",
+            trace=client.logs if client else [],
+            unused_folios=client.unused_folios if client else None,
+            max_authorized=client.max_authorized if client else None,
+            last_range_start=client.last_range_start if client else None,
+            last_range_end=client.last_range_end if client else None,
         )
 
 

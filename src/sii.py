@@ -82,16 +82,68 @@ def extract_caf_xml(html_body: str) -> Optional[str]:
 
 
 def is_blocked_sii_page(html_body: str) -> bool:
-    """Checks if the page is a WAF block or rejection page."""
+    """Checks if the page is a WAF block."""
     # Look for Imperva or classic WAF block signatures
     if "requested URL was rejected" in html_body or "Support ID" in html_body:
-        return True
-    lowered = html_body.lower()
-    if "transaccion rechazada" in lowered or "mesa de ayuda" in lowered:
         return True
     if "imperva" in html_body.lower() or "incapsula" in html_body.lower():
         return True
     return False
+
+
+def is_rejected_sii_page(html_body: str) -> bool:
+    """Checks if the page is a business rejection page from the SII portal."""
+    lowered = html_body.lower()
+    if "transaccion rechazada" in lowered or "mesa de ayuda" in lowered or "transacción rechazada" in lowered:
+        return True
+    return False
+
+
+def parse_folio_info(html_body: str) -> dict:
+    """Parses HTML body of the folio wizard to extract available, max, and last range info."""
+    soup = BeautifulSoup(html_body, "lxml")
+    for script in soup(["script", "style"]):
+        script.decompose()
+    text = " ".join(soup.get_text().split())
+
+    info = {
+        "unused_folios": None,
+        "max_authorized": None,
+        "last_range_start": None,
+        "last_range_end": None,
+    }
+
+    # 1. Unused folios regex
+    match_unused = re.search(r"tiene\s+(\d+)\s+folios\s+sin\s+utilizar", text, re.IGNORECASE)
+    if match_unused:
+        info["unused_folios"] = int(match_unused.group(1))
+    else:
+        match_unused2 = re.search(r"(\d+)\s+folios\s+sin\s+utilizar", text, re.IGNORECASE)
+        if match_unused2:
+            info["unused_folios"] = int(match_unused2.group(1))
+
+    # 2. Max authorized regex
+    match_max = re.search(r"autorizado\s+solicitar\s+hasta\s+(\d+)\s+folios", text, re.IGNORECASE)
+    if match_max:
+        info["max_authorized"] = int(match_max.group(1))
+    else:
+        match_max2 = re.search(r"hasta\s+(\d+)\s+folios\s+de", text, re.IGNORECASE)
+        if match_max2:
+            info["max_authorized"] = int(match_max2.group(1))
+
+    # 3. Last authorized range regex
+    match_range = re.search(r"rango\s*(\d+)\s*(?:al|-)\s*(\d+)", text, re.IGNORECASE)
+    if match_range:
+        info["last_range_start"] = int(match_range.group(1))
+        info["last_range_end"] = int(match_range.group(2))
+    else:
+        match_range2 = re.search(r"del\s*(\d+)\s*al\s*(\d+)", text, re.IGNORECASE)
+        if match_range2:
+            info["last_range_start"] = int(match_range2.group(1))
+            info["last_range_end"] = int(match_range2.group(2))
+
+    return info
+
 
 
 def extract_support_id(html_body: str) -> Optional[str]:
@@ -204,6 +256,11 @@ class SiiClient:
         self.environment = environment
         self.base_url = FOLIO_BASE_URL.get(environment, FOLIO_BASE_URL["maullin"])
         self.logs = []
+
+        self.unused_folios = None
+        self.max_authorized = None
+        self.last_range_start = None
+        self.last_range_end = None
 
         # PFX Cert and Key extraction in memory, writing to NamedTemporaryFiles for ssl context
         self.cert_file = None
@@ -438,6 +495,19 @@ class SiiClient:
                 html = current_resp.text
                 self.log(f"[sii-client] [{self.environment}] [Step {step}] Landed on URL: {current_resp.url}")
 
+                # Try to parse folio info on each step
+                try:
+                    info = parse_folio_info(html)
+                    if info["unused_folios"] is not None:
+                        self.unused_folios = info["unused_folios"]
+                    if info["max_authorized"] is not None:
+                        self.max_authorized = info["max_authorized"]
+                    if info["last_range_start"] is not None:
+                        self.last_range_start = info["last_range_start"]
+                        self.last_range_end = info["last_range_end"]
+                except Exception:
+                    pass
+
                 # Check if WAF blocked us
                 if is_blocked_sii_page(html):
                     support_id = extract_support_id(html)
@@ -445,6 +515,19 @@ class SiiClient:
                     raise SiiException(
                         "SII_FOLIO_REQUEST_BLOCKED",
                         f"Request was blocked by SII classic portal. Support ID: {support_id or 'unknown'}",
+                    )
+
+                # Check if business rejection
+                if is_rejected_sii_page(html):
+                    soup = BeautifulSoup(html, "lxml")
+                    for script in soup(["script", "style"]):
+                        script.decompose()
+                    clean_text = " ".join(soup.get_text().split())
+                    excerpt_text = clean_text[:250] + "..." if len(clean_text) > 250 else clean_text
+                    self.log(f"[sii-client] [{self.environment}] [Step {step}] ERROR: Business Rejection page detected! Excerpt: {excerpt_text}")
+                    raise SiiException(
+                        "SII_FOLIO_REQUEST_REJECTED",
+                        f"Request was rejected by SII classic portal. Details: {excerpt_text}",
                     )
 
                 # Check if we have successfully obtained the CAF XML
@@ -522,6 +605,177 @@ class SiiClient:
             raise SiiException(
                 "SII_FOLIO_FORM_FLOW_LIMIT",
                 "Exceeded maximum form wizard steps without retrieving CAF XML.",
+            )
+
+    async def check_availability(
+        self,
+        rut_sender: str,
+        rut_company: str,
+        document_type: int,
+    ) -> dict:
+        """Navigates the folio wizard up to the quantity input page to query limits and unused folios."""
+        self.log(f"[sii-client] [{self.environment}] Starting automated availability check: Sender={rut_sender}, Company={rut_company}, DTE={document_type}")
+        async with self._create_client() as client:
+            self.log(f"[sii-client] [{self.environment}] Warming up session with standard requests...")
+            await self.warmup(client)
+
+            entry_url = f"{self.base_url}{FOLIO_PATH}"
+            self.log(f"[sii-client] [{self.environment}] Navigating to folio wizard entry URL: {entry_url}")
+            current_resp = await client.get(entry_url, headers={"Referer": "https://www.sii.cl/"})
+
+            # 1. Handle certificate authentication if redirected
+            if is_certificate_auth_page(current_resp.url, current_resp.text):
+                self.log(f"[sii-client] [{self.environment}] Redirection to AUT2000 login detected. Starting handshake...")
+                reference = extract_login_reference(str(current_resp.url), current_resp.text, fallback=entry_url)
+
+                self.log(f"[sii-client] [{self.environment}] Reference extracted: {reference}. Performing POST certificate login...")
+                login_url = f"{CERT_AUTH_URL}?{reference}"
+                
+                # Add human-like pacing delay before certificate login POST
+                login_delay = random.uniform(0.8, 1.6)
+                self.log(f"[sii-client] [{self.environment}] Pausing for {login_delay:.2f}s to simulate human certificate selection delay...")
+                await asyncio.sleep(login_delay)
+
+                login_resp = await client.post(
+                    login_url,
+                    data={"referencia": reference},
+                    headers={"Referer": str(current_resp.url)},
+                )
+
+                self.log(f"[sii-client] [{self.environment}] Certificate login submitted. Re-accessing entry URL...")
+                retry_resp = await client.get(entry_url, headers={"Referer": str(login_resp.url)})
+                current_resp = retry_resp
+
+            # Check if auth failed
+            if is_certificate_auth_page(current_resp.url, current_resp.text):
+                self.log(f"[sii-client] [{self.environment}] ERROR: Landing page still shows login fields. Handshake failed.")
+                err_code = classify_certificate_auth_failure(current_resp.text)
+                raise SiiException(err_code, f"AUT2000 Authentication failed during folio wizard: {err_code}")
+
+            self.log(f"[sii-client] [{self.environment}] Handshake successful. Navigating the folio wizard steps...")
+            # Clean company RUT
+            company_body, company_dv = clean_rut(rut_company)
+
+            # 2. Iterate through forms steps to check availability
+            for step in range(12):  # Maximum form steps
+                html = current_resp.text
+                self.log(f"[sii-client] [{self.environment}] [Step {step}] Landed on URL: {current_resp.url}")
+
+                # Try to parse folio info on each step
+                try:
+                    info = parse_folio_info(html)
+                    if info["unused_folios"] is not None:
+                        self.unused_folios = info["unused_folios"]
+                    if info["max_authorized"] is not None:
+                        self.max_authorized = info["max_authorized"]
+                    if info["last_range_start"] is not None:
+                        self.last_range_start = info["last_range_start"]
+                        self.last_range_end = info["last_range_end"]
+                except Exception:
+                    pass
+
+                # Check if WAF blocked us
+                if is_blocked_sii_page(html):
+                    support_id = extract_support_id(html)
+                    self.log(f"[sii-client] [{self.environment}] [Step {step}] ERROR: WAF Block page detected! Support ID: {support_id or 'unknown'}")
+                    raise SiiException(
+                        "SII_FOLIO_REQUEST_BLOCKED",
+                        f"Request was blocked by SII classic portal. Support ID: {support_id or 'unknown'}",
+                    )
+
+                # Check if business rejection
+                if is_rejected_sii_page(html):
+                    soup = BeautifulSoup(html, "lxml")
+                    for script in soup(["script", "style"]):
+                        script.decompose()
+                    clean_text = " ".join(soup.get_text().split())
+                    excerpt_text = clean_text[:250] + "..." if len(clean_text) > 250 else clean_text
+                    self.log(f"[sii-client] [{self.environment}] [Step {step}] ERROR: Business Rejection page detected! Excerpt: {excerpt_text}")
+                    raise SiiException(
+                        "SII_FOLIO_REQUEST_REJECTED",
+                        f"Request was rejected by SII classic portal. Details: {excerpt_text}",
+                    )
+
+                # Parse the forms in the page
+                forms = self._parse_html_forms(html)
+                self.log(f"[sii-client] [{self.environment}] [Step {step}] Parsed {len(forms)} HTML form(s) on the page.")
+                
+                # Check if we are on the page that asks for quantity (this has the quantity input field)
+                has_quantity_form = False
+                for f in forms:
+                    if any(x in f["inputs"] for x in QUANTITY_FIELD_CANDIDATES):
+                        has_quantity_form = True
+                        break
+                
+                if has_quantity_form:
+                    self.log(f"[sii-client] [{self.environment}] [Step {step}] Arrived at quantity input form. Stopping dry-run.")
+                    return {
+                        "unused_folios": self.unused_folios,
+                        "max_authorized": self.max_authorized,
+                        "last_range_start": self.last_range_start,
+                        "last_range_end": self.last_range_end,
+                    }
+
+                if not forms:
+                    self.log(f"[sii-client] [{self.environment}] [Step {step}] ERROR: No usable forms found on the page. HTML preview: {html[:600]}")
+                    raise SiiException(
+                        "SII_FOLIO_FORM_NOT_FOUND",
+                        f"No usable form found in page. Step {step}. Excerpt: {html[:800]}",
+                    )
+
+                # Select best form
+                selected_form = self._pick_form(forms, str(current_resp.url), document_type)
+                if not selected_form:
+                    self.log(f"[sii-client] [{self.environment}] [Step {step}] No specific wizard form matched. Falling back to the first available form.")
+                    selected_form = forms[0]
+
+                # Prepare fields for submission
+                fields = dict(selected_form["inputs"])
+
+                # Handle company RUT fields
+                for f_name in RUT_EMP_FIELD_CANDIDATES:
+                    if f_name in fields:
+                        fields[f_name] = company_body
+                for f_name in DV_EMP_FIELD_CANDIDATES:
+                    if f_name in fields:
+                        fields[f_name] = company_dv
+
+                # Handle document type field
+                for f_name in DOCUMENT_TYPE_FIELD_CANDIDATES:
+                    if f_name in fields:
+                        fields[f_name] = str(document_type)
+
+                # Resolve action URL
+                action = selected_form["action"] or ""
+                action_url = urllib.parse.urljoin(str(current_resp.url), action)
+
+                self.log(f"[sii-client] [{self.environment}] [Step {step}] Submitting {selected_form['method']} to {action_url}")
+                self.log(f"[sii-client] [{self.environment}] [Step {step}] Form fields: {list(fields.keys())}")
+
+                # Submit form with randomized human-like pacing delay
+                delay = random.uniform(0.65, 1.45)
+                self.log(f"[sii-client] [{self.environment}] [Step {step}] Pausing for {delay:.2f}s to simulate human navigation pacing...")
+                await asyncio.sleep(delay)
+
+                # Submit form
+                if selected_form["method"] == "POST":
+                    current_resp = await client.post(
+                        action_url,
+                        data=fields,
+                        headers={"Referer": str(current_resp.url)},
+                    )
+                else:
+                    current_resp = await client.get(
+                        action_url,
+                        params=fields,
+                        headers={"Referer": str(current_resp.url)},
+                    )
+
+            # If we reached the step limit without reaching quantity input form
+            self.log(f"[sii-client] [{self.environment}] ERROR: Exceeded step limit (12 steps) without reaching quantity input form.")
+            raise SiiException(
+                "SII_FOLIO_FORM_FLOW_LIMIT",
+                "Exceeded maximum form wizard steps without reaching folio quantity input form.",
             )
 
     def _parse_html_forms(self, html_content: str) -> List[Dict]:

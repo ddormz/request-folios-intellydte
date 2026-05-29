@@ -218,7 +218,7 @@ class SiiClient:
         try:
             pfx_data = base64.b64decode(self.pfx_base64)
             # cryptography PKCS12 load
-            private_key, certificate, _ = pkcs12.load_key_and_certificates(
+            private_key, certificate, additional_certificates = pkcs12.load_key_and_certificates(
                 pfx_data, self.pfx_password.encode("utf-8")
             )
             if not private_key or not certificate:
@@ -230,6 +230,10 @@ class SiiClient:
                 encryption_algorithm=serialization.NoEncryption(),
             )
             pem_cert = certificate.public_bytes(serialization.Encoding.PEM)
+            if additional_certificates:
+                for add_cert in additional_certificates:
+                    if add_cert:
+                        pem_cert += b"\n" + add_cert.public_bytes(serialization.Encoding.PEM)
 
             # Write to temporary files
             # delete=False is used because Windows has file-sharing locks that prevent reading open temp files

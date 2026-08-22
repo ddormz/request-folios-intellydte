@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import Literal, Optional, List
 
 
 class ProbeAuthRequest(BaseModel):
@@ -35,6 +35,9 @@ class FolioResponse(BaseModel):
     max_authorized: Optional[int] = Field(None, description="Maximum authorized folios that can be requested")
     last_range_start: Optional[int] = Field(None, description="Start of the last authorized folio range")
     last_range_end: Optional[int] = Field(None, description="End of the last authorized folio range")
+    availability_status: Optional[Literal["known", "partial", "unknown"]] = Field(
+        None, description="Whether SII availability data is complete, partial, or unavailable"
+    )
 
 
 class AvailabilityRequest(BaseModel):
@@ -55,4 +58,7 @@ class AvailabilityResponse(BaseModel):
     error_code: Optional[str] = Field(None, description="Error code if request failed")
     message: str
     trace: Optional[List[str]] = Field(None, description="The scraping trace log lines")
+    availability_status: Optional[Literal["known", "partial", "unknown"]] = Field(
+        None, description="Whether SII availability data is complete, partial, or unavailable"
+    )
 

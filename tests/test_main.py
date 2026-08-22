@@ -1,8 +1,12 @@
-import pytest
 from fastapi.testclient import TestClient
 from src.main import app
 from src.config import settings
-from src.sii import extract_login_reference, extract_support_id, is_blocked_sii_page
+from src.sii import (
+    extract_login_reference,
+    extract_support_id,
+    is_blocked_sii_page,
+    is_rejected_sii_page,
+)
 
 client = TestClient(app)
 
@@ -77,5 +81,6 @@ def test_detects_transaccion_rechazada_and_extracts_id():
     </body></html>
     """
 
-    assert is_blocked_sii_page(html) is True
+    assert is_blocked_sii_page(html) is False
+    assert is_rejected_sii_page(html) is True
     assert extract_support_id(html) == "2319082957939332096"

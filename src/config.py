@@ -30,6 +30,11 @@ class Settings:
     SERVER_KEY_PATH: str = os.getenv("SERVER_KEY_PATH", str(BASE_DIR / "certs" / "server.key"))
     
     # SII Settings
-    SII_TIMEOUT: int = int(os.getenv("SII_TIMEOUT", "30"))
+    SII_TIMEOUT: float = float(os.getenv("SII_TIMEOUT", "30"))
+    SII_MAX_CONCURRENT_REQUESTS: int = int(
+        os.getenv("SII_MAX_CONCURRENT_REQUESTS", "4")
+    )
+    SII_QUEUE_TIMEOUT: float = float(os.getenv("SII_QUEUE_TIMEOUT", "30"))
+    SII_OPERATION_TIMEOUT: float = float(os.getenv("SII_OPERATION_TIMEOUT", "140"))
 
 settings = Settings()

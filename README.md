@@ -57,6 +57,30 @@ set PYTHONPATH=.
 pytest
 ```
 
+## Folio API behavior
+
+- `POST /api/v1/folios/check-availability` reports `max_authorized`,
+  `unused_folios` and `availability_status` (`known`, `partial` or `unknown`).
+- `POST /api/v1/folios/request` preserves the existing response fields and also
+  reports the availability fields discovered while navigating SII.
+- Operational failures continue to return HTTP 200 with `success=false`.
+- Requests for different companies can run concurrently. Requests for the same
+  `environment + rut_company` are serialized.
+
+New operational error codes are:
+
+- `SII_FOLIO_AMOUNT_EXCEEDS_MAX_AUTHORIZED`
+- `SII_FOLIO_AVAILABILITY_UNAVAILABLE`
+- `SII_FOLIO_FORM_CHANGED`
+- `SII_FOLIO_BUSY`
+- `SII_FOLIO_OUTCOME_UNKNOWN`
+
+Concurrency and timeouts can be configured with
+`SII_MAX_CONCURRENT_REQUESTS` (default `4`), `SII_QUEUE_TIMEOUT` (default `30`
+seconds), `SII_TIMEOUT` (default `30` seconds per HTTP operation) and
+`SII_OPERATION_TIMEOUT` (default `140` seconds for the total API operation,
+including queue wait).
+
 ---
 
 ## Dokploy Deployment Guide (Manual Configuration)

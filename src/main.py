@@ -1,9 +1,31 @@
+import asyncio
+import re
+
 import uvicorn
-from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi import Depends, FastAPI
 from src.config import settings
 from src.auth import verify_token
+from src.coordinator import FolioBusy, FolioCoordinator
 from src.schemas import ProbeAuthRequest, ProbeAuthResponse, FolioRequest, FolioResponse, AvailabilityRequest, AvailabilityResponse
 from src.sii import SiiClient, SiiException
+
+
+folio_coordinator = FolioCoordinator(
+    max_concurrent=settings.SII_MAX_CONCURRENT_REQUESTS,
+    queue_timeout=min(settings.SII_QUEUE_TIMEOUT, settings.SII_OPERATION_TIMEOUT),
+)
+
+
+def _company_key(rut_company: str) -> str:
+    return re.sub(r"[^0-9kK]", "", rut_company).upper()
+
+
+def _operation_deadline() -> float:
+    return asyncio.get_running_loop().time() + settings.SII_OPERATION_TIMEOUT
+
+
+def _remaining_time(deadline: float) -> float:
+    return max(0.0, deadline - asyncio.get_running_loop().time())
 
 app = FastAPI(
     title="Folio Bridge Python Microservice",
@@ -25,18 +47,39 @@ def health_check():
 )
 async def probe_auth(request: ProbeAuthRequest):
     client = None
+    deadline = _operation_deadline()
     try:
-        client = SiiClient(
-            pfx_base64=request.pfx_base64,
-            pfx_password=request.pfx_password,
-            environment=request.environment,
+        async with folio_coordinator.slot(
+            request.environment, f"probe-{id(request)}"
+        ):
+            client = SiiClient(
+                pfx_base64=request.pfx_base64,
+                pfx_password=request.pfx_password,
+                environment=request.environment,
+            )
+            message = await asyncio.wait_for(
+                client.probe_auth(), timeout=_remaining_time(deadline)
+            )
+            return ProbeAuthResponse(success=True, message=message, trace=client.logs)
+    except FolioBusy:
+        return ProbeAuthResponse(
+            success=False,
+            message="SII_FOLIO_BUSY: SII request capacity is currently exhausted.",
+            trace=[],
         )
-        message = await client.probe_auth()
-        return ProbeAuthResponse(success=True, message=message, trace=client.logs)
+    except asyncio.TimeoutError:
+        return ProbeAuthResponse(
+            success=False,
+            message="SII_FOLIO_UNEXPECTED_ERROR: SII operation deadline exceeded.",
+            trace=client.logs if client else [],
+        )
     except SiiException as e:
         return ProbeAuthResponse(success=False, message=f"{e.code}: {e.message}", trace=client.logs if client else [])
     except Exception as e:
         return ProbeAuthResponse(success=False, message=f"Unexpected error: {str(e)}", trace=client.logs if client else [])
+    finally:
+        if client:
+            client.cleanup()
 
 
 @app.post(
@@ -47,27 +90,69 @@ async def probe_auth(request: ProbeAuthRequest):
 )
 async def request_folios(request: FolioRequest):
     client = None
+    deadline = _operation_deadline()
     try:
-        client = SiiClient(
-            pfx_base64=request.pfx_base64,
-            pfx_password=request.pfx_password,
-            environment=request.environment,
+        async with folio_coordinator.slot(
+            request.environment, _company_key(request.rut_company)
+        ):
+            client = SiiClient(
+                pfx_base64=request.pfx_base64,
+                pfx_password=request.pfx_password,
+                environment=request.environment,
+            )
+            try:
+                caf_xml = await asyncio.wait_for(
+                    client.request_folios(
+                        rut_sender=request.rut_sender,
+                        rut_company=request.rut_company,
+                        document_type=request.document_type,
+                        amount=request.amount,
+                    ),
+                    timeout=_remaining_time(deadline),
+                )
+                return FolioResponse(
+                    success=True,
+                    caf_xml=caf_xml,
+                    message="Folios retrieved successfully",
+                    trace=client.logs,
+                    unused_folios=client.unused_folios,
+                    max_authorized=client.max_authorized,
+                    last_range_start=client.last_range_start,
+                    last_range_end=client.last_range_end,
+                    availability_status=client.availability_status,
+                )
+            finally:
+                client.cleanup()
+    except FolioBusy:
+        return FolioResponse(
+            success=False,
+            error_code="SII_FOLIO_BUSY",
+            message="SII request capacity is currently exhausted.",
+            trace=[],
+            availability_status="unknown",
         )
-        caf_xml = await client.request_folios(
-            rut_sender=request.rut_sender,
-            rut_company=request.rut_company,
-            document_type=request.document_type,
-            amount=request.amount,
+    except asyncio.TimeoutError:
+        outcome_unknown = bool(
+            client and getattr(client, "final_submission_started", False)
         )
         return FolioResponse(
-            success=True,
-            caf_xml=caf_xml,
-            message="Folios retrieved successfully",
-            trace=client.logs,
-            unused_folios=client.unused_folios,
-            max_authorized=client.max_authorized,
-            last_range_start=client.last_range_start,
-            last_range_end=client.last_range_end,
+            success=False,
+            error_code=(
+                "SII_FOLIO_OUTCOME_UNKNOWN"
+                if outcome_unknown
+                else "SII_FOLIO_UNEXPECTED_ERROR"
+            ),
+            message=(
+                "SII final submission timed out; do not retry automatically."
+                if outcome_unknown
+                else "SII operation deadline exceeded."
+            ),
+            trace=client.logs if client else [],
+            unused_folios=client.unused_folios if client else None,
+            max_authorized=client.max_authorized if client else None,
+            last_range_start=client.last_range_start if client else None,
+            last_range_end=client.last_range_end if client else None,
+            availability_status=client.availability_status if client else "unknown",
         )
     except SiiException as e:
         return FolioResponse(
@@ -79,6 +164,7 @@ async def request_folios(request: FolioRequest):
             max_authorized=client.max_authorized if client else None,
             last_range_start=client.last_range_start if client else None,
             last_range_end=client.last_range_end if client else None,
+            availability_status=client.availability_status if client else "unknown",
         )
     except Exception as e:
         return FolioResponse(
@@ -90,6 +176,7 @@ async def request_folios(request: FolioRequest):
             max_authorized=client.max_authorized if client else None,
             last_range_start=client.last_range_start if client else None,
             last_range_end=client.last_range_end if client else None,
+            availability_status=client.availability_status if client else "unknown",
         )
 
 
@@ -101,25 +188,68 @@ async def request_folios(request: FolioRequest):
 )
 async def check_availability(request: AvailabilityRequest):
     client = None
+    deadline = _operation_deadline()
     try:
-        client = SiiClient(
-            pfx_base64=request.pfx_base64,
-            pfx_password=request.pfx_password,
-            environment=request.environment,
-        )
-        info = await client.check_availability(
-            rut_sender=request.rut_sender,
-            rut_company=request.rut_company,
-            document_type=request.document_type,
-        )
+        async with folio_coordinator.slot(
+            request.environment, _company_key(request.rut_company)
+        ):
+            client = SiiClient(
+                pfx_base64=request.pfx_base64,
+                pfx_password=request.pfx_password,
+                environment=request.environment,
+            )
+            try:
+                info = await asyncio.wait_for(
+                    client.check_availability(
+                        rut_sender=request.rut_sender,
+                        rut_company=request.rut_company,
+                        document_type=request.document_type,
+                    ),
+                    timeout=_remaining_time(deadline),
+                )
+                if info.get("max_authorized") is None:
+                    return AvailabilityResponse(
+                        success=False,
+                        unused_folios=info.get("unused_folios"),
+                        max_authorized=None,
+                        last_range_start=info.get("last_range_start"),
+                        last_range_end=info.get("last_range_end"),
+                        availability_status="unknown",
+                        error_code="SII_FOLIO_AVAILABILITY_UNAVAILABLE",
+                        message="SII did not expose the maximum authorized folio amount.",
+                        trace=client.logs,
+                    )
+                return AvailabilityResponse(
+                    success=True,
+                    unused_folios=info.get("unused_folios"),
+                    max_authorized=info.get("max_authorized"),
+                    last_range_start=info.get("last_range_start"),
+                    last_range_end=info.get("last_range_end"),
+                    availability_status=info.get("availability_status"),
+                    message="Folio availability retrieved successfully",
+                    trace=client.logs,
+                )
+            finally:
+                client.cleanup()
+    except FolioBusy:
         return AvailabilityResponse(
-            success=True,
-            unused_folios=info.get("unused_folios"),
-            max_authorized=info.get("max_authorized"),
-            last_range_start=info.get("last_range_start"),
-            last_range_end=info.get("last_range_end"),
-            message="Folio availability retrieved successfully",
-            trace=client.logs,
+            success=False,
+            error_code="SII_FOLIO_BUSY",
+            message="SII request capacity is currently exhausted.",
+            trace=[],
+            availability_status="unknown",
+        )
+    except asyncio.TimeoutError:
+        return AvailabilityResponse(
+            success=False,
+            error_code="SII_FOLIO_UNEXPECTED_ERROR",
+            message="SII operation deadline exceeded.",
+            trace=client.logs if client else [],
+            unused_folios=client.unused_folios if client else None,
+            max_authorized=client.max_authorized if client else None,
+            last_range_start=client.last_range_start if client else None,
+            last_range_end=client.last_range_end if client else None,
+            availability_status=client.availability_status if client else "unknown",
         )
     except SiiException as e:
         return AvailabilityResponse(
@@ -131,6 +261,7 @@ async def check_availability(request: AvailabilityRequest):
             max_authorized=client.max_authorized if client else None,
             last_range_start=client.last_range_start if client else None,
             last_range_end=client.last_range_end if client else None,
+            availability_status=client.availability_status if client else "unknown",
         )
     except Exception as e:
         return AvailabilityResponse(
@@ -142,6 +273,7 @@ async def check_availability(request: AvailabilityRequest):
             max_authorized=client.max_authorized if client else None,
             last_range_start=client.last_range_start if client else None,
             last_range_end=client.last_range_end if client else None,
+            availability_status=client.availability_status if client else "unknown",
         )
 
 

@@ -18,6 +18,23 @@ def test_reads_max_authorized_from_readonly_input():
     assert info["availability_status"] == "partial"
 
 
+def test_reports_where_unparsed_maximum_markers_exist():
+    html = """
+    <html><body>
+      <iframe src="/cvc_cgi/dte/availability_detail"></iframe>
+      <script>window.template = 'MAX_AUTOR';</script>
+    </body></html>
+    """
+
+    info = parse_folio_info(html)
+
+    assert info["max_authorized"] is None
+    assert info["raw_max_authorized_marker_present"] is True
+    assert info["text_max_authorized_label_present"] is False
+    assert info["script_max_authorized_marker_present"] is True
+    assert info["iframe_count"] == 1
+
+
 def test_ignores_zero_placeholder_when_page_exposes_a_positive_maximum():
     info = parse_folio_info(fixture("availability_placeholder_zero.html"))
 

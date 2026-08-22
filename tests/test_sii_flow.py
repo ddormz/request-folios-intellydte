@@ -298,6 +298,10 @@ def test_folio_metadata_trace_reports_page_candidates_and_retained_values():
     assert "FOLIOS_DISP candidates=[5]" in trace
     assert "retained max_authorized=11" in trace
     assert "unused_folios=5" in trace
+    assert "raw MAX_AUTOR marker=yes" in trace
+    assert "text maximum label=no" in trace
+    assert "script MAX_AUTOR marker=no" in trace
+    assert "iframes=0" in trace
 
 
 def test_folio_metadata_parser_failure_is_visible_in_safe_trace(monkeypatch):

@@ -264,7 +264,11 @@ class SiiClient:
             f"MAX_AUTOR candidates={info['max_authorized_candidates']}; "
             f"FOLIOS_DISP candidates={info['unused_folios_candidates']}; "
             f"retained max_authorized={self.max_authorized if self.max_authorized is not None else 'unknown'}; "
-            f"unused_folios={self.unused_folios if self.unused_folios is not None else 'unknown'}."
+            f"unused_folios={self.unused_folios if self.unused_folios is not None else 'unknown'}; "
+            f"raw MAX_AUTOR marker={'yes' if info['raw_max_authorized_marker_present'] else 'no'}; "
+            f"text maximum label={'yes' if info['text_max_authorized_label_present'] else 'no'}; "
+            f"script MAX_AUTOR marker={'yes' if info['script_max_authorized_marker_present'] else 'no'}; "
+            f"iframes={info['iframe_count']}."
         )
 
     def _extract_credentials(self):

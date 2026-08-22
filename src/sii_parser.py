@@ -66,6 +66,14 @@ def parse_folio_info(html_body: str) -> dict:
     """Extracts availability and confirmed ranges without trusting preview ranges."""
     soup = BeautifulSoup(html_body, "lxml")
     text = _normalized_text(html_body)
+    raw_max_authorized_marker_present = bool(
+        re.search(r"MAX_AUTOR", html_body, re.IGNORECASE)
+    )
+    text_max_authorized_label_present = "maximo autorizado" in text
+    script_max_authorized_marker_present = any(
+        re.search(r"MAX_AUTOR", script.get_text(), re.IGNORECASE)
+        for script in soup.find_all("script")
+    )
 
     unused_candidates = _input_integers(soup, "FOLIOS_DISP")
     unused_folios = unused_candidates[0] if unused_candidates else None
@@ -128,4 +136,8 @@ def parse_folio_info(html_body: str) -> dict:
         "availability_status": availability_status,
         "max_authorized_candidates": max_candidates,
         "unused_folios_candidates": unused_candidates,
+        "raw_max_authorized_marker_present": raw_max_authorized_marker_present,
+        "text_max_authorized_label_present": text_max_authorized_label_present,
+        "script_max_authorized_marker_present": script_max_authorized_marker_present,
+        "iframe_count": len(soup.find_all("iframe")),
     }

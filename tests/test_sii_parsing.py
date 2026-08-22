@@ -32,6 +32,15 @@ def test_zero_placeholder_alone_does_not_become_a_known_maximum():
     assert info["availability_status"] == "unknown"
 
 
+def test_text_fallback_does_not_turn_an_unrelated_zero_into_the_maximum():
+    info = parse_folio_info(
+        fixture("availability_zero_followed_by_unrelated_number.html")
+    )
+
+    assert info["max_authorized"] is None
+    assert info["availability_status"] == "unknown"
+
+
 def test_reads_confirmation_values_without_treating_preview_as_authorized_range():
     info = parse_folio_info(fixture("confirmation_over_limit.html"))
 

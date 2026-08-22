@@ -86,8 +86,10 @@ def parse_folio_info(html_body: str) -> dict:
         for pattern in patterns:
             match = re.search(pattern, text)
             if match:
-                max_authorized = _parse_integer(match.group(1))
-                break
+                candidate = _parse_integer(match.group(1))
+                if candidate is not None and candidate > 0:
+                    max_authorized = candidate
+                    break
 
     last_range_start = None
     last_range_end = None

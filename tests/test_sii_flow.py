@@ -245,6 +245,22 @@ def test_availability_status_is_derived_from_values_accumulated_across_steps():
     assert info["availability_status"] == "partial"
 
 
+def test_later_zero_placeholder_does_not_overwrite_a_known_positive_maximum():
+    client = make_client(lambda _request: httpx.Response(200, text=""))
+
+    client._update_folio_info(
+        '<input name="MAX_AUTOR" value="11">'
+        '<input name="FOLIOS_DISP" value="5">'
+    )
+    client._update_folio_info(
+        fixture("availability_zero_followed_by_unrelated_number.html")
+    )
+
+    assert client.max_authorized == 11
+    assert client.unused_folios == 5
+    assert client.availability_status == "known"
+
+
 def test_trace_does_not_expose_query_parameters_from_sii_urls():
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/of_solicita_folios"):

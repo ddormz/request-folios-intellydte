@@ -122,6 +122,30 @@ def test_late_limit_rejection_uses_specific_error_code():
     assert exc_info.value.code == "SII_FOLIO_AMOUNT_EXCEEDS_MAX_AUTHORIZED"
 
 
+def test_late_limit_rejection_includes_requested_and_maximum_amounts():
+    rejection_with_maximum = fixture("limit_rejection.html") + (
+        '<input name="MAX_AUTOR" value="11">'
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/of_solicita_folios"):
+            return confirmation_redirect()
+        if request.method == "POST":
+            return httpx.Response(200, text=rejection_with_maximum)
+        return httpx.Response(200, text=fixture("confirmation_unknown_limit.html"))
+
+    client = make_client(handler)
+
+    with pytest.raises(SiiException) as exc_info:
+        run_request(client, amount=20)
+
+    assert exc_info.value.code == "SII_FOLIO_AMOUNT_EXCEEDS_MAX_AUTHORIZED"
+    assert exc_info.value.message == (
+        "Requested 20 folios, but SII authorizes a maximum of 11."
+    )
+    assert client.max_authorized == 11
+
+
 def test_success_receipt_without_caf_is_reported_as_unknown_outcome(monkeypatch):
     async def no_delay(_seconds):
         return None

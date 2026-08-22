@@ -500,9 +500,14 @@ class SiiClient:
 
                 if is_limit_exceeded_page(html):
                     self.log(f"[sii-client] [{self.environment}] [Step {step}] ERROR: Requested amount exceeds the SII authorized maximum.")
+                    message = (
+                        f"Requested {amount} folios, but SII authorizes a maximum of {self.max_authorized}."
+                        if self.max_authorized is not None
+                        else "The requested folio amount exceeds the maximum authorized by SII."
+                    )
                     raise SiiException(
                         "SII_FOLIO_AMOUNT_EXCEEDS_MAX_AUTHORIZED",
-                        "The requested folio amount exceeds the maximum authorized by SII.",
+                        message,
                     )
 
                 # Check if business rejection

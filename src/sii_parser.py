@@ -25,10 +25,16 @@ def _parse_integer(value: Optional[str]) -> Optional[int]:
 
 
 def _input_integer(soup: BeautifulSoup, name: str) -> Optional[int]:
-    field = soup.find(attrs={"name": re.compile(rf"^{re.escape(name)}$", re.IGNORECASE)})
-    if field is None:
-        return None
-    return _parse_integer(field.get("value"))
+    values = _input_integers(soup, name)
+    return values[0] if values else None
+
+
+def _input_integers(soup: BeautifulSoup, name: str) -> list[int]:
+    fields = soup.find_all(
+        attrs={"name": re.compile(rf"^{re.escape(name)}$", re.IGNORECASE)}
+    )
+    values = (_parse_integer(field.get("value")) for field in fields)
+    return [value for value in values if value is not None]
 
 
 def is_rejected_sii_page(html_body: str) -> bool:
@@ -62,7 +68,8 @@ def parse_folio_info(html_body: str) -> dict:
     text = _normalized_text(html_body)
 
     unused_folios = _input_integer(soup, "FOLIOS_DISP")
-    max_authorized = _input_integer(soup, "MAX_AUTOR")
+    max_candidates = _input_integers(soup, "MAX_AUTOR")
+    max_authorized = next((value for value in max_candidates if value > 0), None)
     requested_amount = _input_integer(soup, "CANT_DOCTOS")
 
     if unused_folios is None:

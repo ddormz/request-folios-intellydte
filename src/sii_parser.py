@@ -67,7 +67,8 @@ def parse_folio_info(html_body: str) -> dict:
     soup = BeautifulSoup(html_body, "lxml")
     text = _normalized_text(html_body)
 
-    unused_folios = _input_integer(soup, "FOLIOS_DISP")
+    unused_candidates = _input_integers(soup, "FOLIOS_DISP")
+    unused_folios = unused_candidates[0] if unused_candidates else None
     max_candidates = _input_integers(soup, "MAX_AUTOR")
     max_authorized = next((value for value in max_candidates if value > 0), None)
     requested_amount = _input_integer(soup, "CANT_DOCTOS")
@@ -125,4 +126,6 @@ def parse_folio_info(html_body: str) -> dict:
         "last_range_start": last_range_start,
         "last_range_end": last_range_end,
         "availability_status": availability_status,
+        "max_authorized_candidates": max_candidates,
+        "unused_folios_candidates": unused_candidates,
     }

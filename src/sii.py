@@ -259,6 +259,14 @@ class SiiClient:
         else:
             self.availability_status = "known"
 
+        self.log(
+            f"[sii-client] [{self.environment}] Folio metadata: "
+            f"MAX_AUTOR candidates={info['max_authorized_candidates']}; "
+            f"FOLIOS_DISP candidates={info['unused_folios_candidates']}; "
+            f"retained max_authorized={self.max_authorized if self.max_authorized is not None else 'unknown'}; "
+            f"unused_folios={self.unused_folios if self.unused_folios is not None else 'unknown'}."
+        )
+
     def _extract_credentials(self):
         try:
             pfx_data = base64.b64decode(self.pfx_base64)
@@ -486,8 +494,11 @@ class SiiClient:
                 # Try to parse folio info on each step
                 try:
                     self._update_folio_info(html)
-                except Exception:
-                    pass
+                except Exception as error:
+                    self.log(
+                        f"[sii-client] [{self.environment}] [Step {step}] "
+                        f"Folio metadata parser failed: {type(error).__name__}."
+                    )
 
                 # Check if WAF blocked us
                 if is_blocked_sii_page(html):
@@ -681,8 +692,11 @@ class SiiClient:
                 # Try to parse folio info on each step
                 try:
                     self._update_folio_info(html)
-                except Exception:
-                    pass
+                except Exception as error:
+                    self.log(
+                        f"[sii-client] [{self.environment}] [Step {step}] "
+                        f"Folio metadata parser failed: {type(error).__name__}."
+                    )
 
                 # Check if WAF blocked us
                 if is_blocked_sii_page(html):

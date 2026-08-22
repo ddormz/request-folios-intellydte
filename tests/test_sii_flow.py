@@ -285,6 +285,38 @@ def test_later_zero_placeholder_does_not_overwrite_a_known_positive_maximum():
     assert client.availability_status == "known"
 
 
+def test_folio_metadata_trace_reports_page_candidates_and_retained_values():
+    client = make_client(lambda _request: httpx.Response(200, text=""))
+
+    client._update_folio_info(
+        '<input name="MAX_AUTOR" value="11">'
+        '<input name="FOLIOS_DISP" value="5">'
+    )
+
+    trace = " ".join(client.logs)
+    assert "MAX_AUTOR candidates=[11]" in trace
+    assert "FOLIOS_DISP candidates=[5]" in trace
+    assert "retained max_authorized=11" in trace
+    assert "unused_folios=5" in trace
+
+
+def test_folio_metadata_parser_failure_is_visible_in_safe_trace(monkeypatch):
+    def fail_parser(_html):
+        raise ValueError("sensitive response content")
+
+    monkeypatch.setattr("src.sii.parse_folio_info", fail_parser)
+    client = make_client(
+        lambda _request: httpx.Response(200, text=fixture("unknown_form.html"))
+    )
+
+    with pytest.raises(SiiException):
+        run_request(client)
+
+    trace = " ".join(client.logs)
+    assert "Folio metadata parser failed: ValueError" in trace
+    assert "sensitive response content" not in trace
+
+
 def test_trace_does_not_expose_query_parameters_from_sii_urls():
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/of_solicita_folios"):

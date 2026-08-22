@@ -263,6 +263,8 @@ class SiiClient:
             f"[sii-client] [{self.environment}] Folio metadata: "
             f"MAX_AUTOR candidates={info['max_authorized_candidates']}; "
             f"FOLIOS_DISP candidates={info['unused_folios_candidates']}; "
+            f"script MAX_AUTOR candidates={info['script_max_authorized_candidates']}; "
+            f"script FOLIOS_DISP candidates={info['script_unused_folios_candidates']}; "
             f"retained max_authorized={self.max_authorized if self.max_authorized is not None else 'unknown'}; "
             f"unused_folios={self.unused_folios if self.unused_folios is not None else 'unknown'}; "
             f"raw MAX_AUTOR marker={'yes' if info['raw_max_authorized_marker_present'] else 'no'}; "

@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from src.sii import is_rejected_sii_page, parse_folio_info
 
 
@@ -33,6 +35,35 @@ def test_reports_where_unparsed_maximum_markers_exist():
     assert info["text_max_authorized_label_present"] is False
     assert info["script_max_authorized_marker_present"] is True
     assert info["iframe_count"] == 1
+
+
+def test_reads_dynamic_availability_from_html_embedded_in_script():
+    html = r"""
+    <script>
+      document.write('<input name=\"MAX_AUTOR\" value=\"37\">');
+      document.write('<input name=\"FOLIOS_DISP\" value=\"5\">');
+    </script>
+    """
+
+    info = parse_folio_info(html)
+
+    assert info["max_authorized"] == 37
+    assert info["unused_folios"] == 5
+    assert info["availability_status"] == "known"
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        "document.form1.MAX_AUTOR.value = 37;",
+        "const MAX_AUTOR = 37;",
+        "document.querySelector('[name=MAX_AUTOR]').val(37);",
+    ],
+)
+def test_reads_maximum_from_common_javascript_assignments(script):
+    info = parse_folio_info(f"<script>{script}</script>")
+
+    assert info["max_authorized"] == 37
 
 
 def test_ignores_zero_placeholder_when_page_exposes_a_positive_maximum():

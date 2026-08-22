@@ -1,3 +1,4 @@
+import html
 import re
 import unicodedata
 from typing import Optional
@@ -35,6 +36,31 @@ def _input_integers(soup: BeautifulSoup, name: str) -> list[int]:
     )
     values = (_parse_integer(field.get("value")) for field in fields)
     return [value for value in values if value is not None]
+
+
+def _script_input_integers(soup: BeautifulSoup, name: str) -> list[int]:
+    values = []
+    for script in soup.find_all("script"):
+        script_body = html.unescape(script.get_text())
+        embedded_html = script_body.replace(r'\"', '"').replace(r"\'", "'")
+        values.extend(_input_integers(BeautifulSoup(embedded_html, "lxml"), name))
+
+        assignment_patterns = (
+            rf"\b{re.escape(name)}\b\s*\.\s*value\s*=\s*['\"]?([0-9][0-9.]*)",
+            rf"\b(?:var|let|const)\s+{re.escape(name)}\s*=\s*['\"]?([0-9][0-9.]*)",
+            rf"\b{re.escape(name)}\b[^;\n]{{0,120}}?\.\s*val\(\s*['\"]?([0-9][0-9.]*)",
+        )
+        for pattern in assignment_patterns:
+            values.extend(
+                value
+                for value in (
+                    _parse_integer(match)
+                    for match in re.findall(pattern, script_body, re.IGNORECASE)
+                )
+                if value is not None
+            )
+
+    return list(dict.fromkeys(values))
 
 
 def is_rejected_sii_page(html_body: str) -> bool:
@@ -76,9 +102,15 @@ def parse_folio_info(html_body: str) -> dict:
     )
 
     unused_candidates = _input_integers(soup, "FOLIOS_DISP")
-    unused_folios = unused_candidates[0] if unused_candidates else None
+    script_unused_candidates = _script_input_integers(soup, "FOLIOS_DISP")
+    all_unused_candidates = unused_candidates + script_unused_candidates
+    unused_folios = all_unused_candidates[0] if all_unused_candidates else None
     max_candidates = _input_integers(soup, "MAX_AUTOR")
-    max_authorized = next((value for value in max_candidates if value > 0), None)
+    script_max_candidates = _script_input_integers(soup, "MAX_AUTOR")
+    max_authorized = next(
+        (value for value in max_candidates + script_max_candidates if value > 0),
+        None,
+    )
     requested_amount = _input_integer(soup, "CANT_DOCTOS")
 
     if unused_folios is None:
@@ -136,6 +168,8 @@ def parse_folio_info(html_body: str) -> dict:
         "availability_status": availability_status,
         "max_authorized_candidates": max_candidates,
         "unused_folios_candidates": unused_candidates,
+        "script_max_authorized_candidates": script_max_candidates,
+        "script_unused_folios_candidates": script_unused_candidates,
         "raw_max_authorized_marker_present": raw_max_authorized_marker_present,
         "text_max_authorized_label_present": text_max_authorized_label_present,
         "script_max_authorized_marker_present": script_max_authorized_marker_present,

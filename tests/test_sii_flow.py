@@ -304,6 +304,18 @@ def test_folio_metadata_trace_reports_page_candidates_and_retained_values():
     assert "iframes=0" in trace
 
 
+def test_folio_metadata_trace_reports_script_candidates():
+    client = make_client(lambda _request: httpx.Response(200, text=""))
+
+    client._update_folio_info(
+        "<script>document.form1.MAX_AUTOR.value = 37;</script>"
+    )
+
+    trace = " ".join(client.logs)
+    assert "script MAX_AUTOR candidates=[37]" in trace
+    assert "retained max_authorized=37" in trace
+
+
 def test_folio_metadata_parser_failure_is_visible_in_safe_trace(monkeypatch):
     def fail_parser(_html):
         raise ValueError("sensitive response content")

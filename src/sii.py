@@ -54,6 +54,11 @@ MAULLIN_DOWNLOAD_FOLIOS_FORM_PATHS = [
     "/cvc_cgi/dte/of_descarga_folio",
     "/cvc_cgi/dte/of_descarga_folios",
 ]
+POST_AUTHORIZATION_DOWNLOAD_FORM_PATHS = [
+    "/cvc_cgi/dte/of_descarga_caf",
+    "/cvc_cgi/dte/of_descarga_folio",
+    "/cvc_cgi/dte/of_descarga_folios",
+]
 
 
 class SiiException(Exception):
@@ -232,6 +237,7 @@ class SiiClient:
         self.last_range_end = None
         self.availability_status = "unknown"
         self.final_submission_started = False
+        self.post_authorization_download_started = False
 
         # PFX Cert and Key extraction in memory, writing to NamedTemporaryFiles for ssl context
         self.cert_file = None
@@ -541,38 +547,44 @@ class SiiClient:
                     self.log(f"[sii-client] [{self.environment}] [Step {step}] SUCCESS! CAF XML extracted: {len(caf_xml)} bytes.")
                     return caf_xml
 
-                if is_success_receipt(html):
-                    self.log(f"[sii-client] [{self.environment}] [Step {step}] ERROR: SII authorized the range but no CAF could be retrieved.")
-                    raise SiiException(
-                        "SII_FOLIO_OUTCOME_UNKNOWN",
-                        "SII authorized the folio range, but the CAF could not be retrieved. Do not retry automatically.",
+                # Parse the forms in the page
+                forms = self._parse_html_forms(html)
+                self.log(f"[sii-client] [{self.environment}] [Step {step}] Parsed {len(forms)} HTML form(s) on the page.")
+                selected_form = None
+                if self.final_submission_started and not self.post_authorization_download_started:
+                    selected_form = self._pick_post_authorization_download_form(
+                        forms, str(current_resp.url)
                     )
 
-                if self.final_submission_started:
+                if self.final_submission_started and not selected_form:
+                    if is_success_receipt(html):
+                        self.log(f"[sii-client] [{self.environment}] [Step {step}] ERROR: SII authorized the range but no CAF could be retrieved.")
+                        raise SiiException(
+                            "SII_FOLIO_OUTCOME_UNKNOWN",
+                            "SII authorized the folio range, but the CAF could not be retrieved. Do not retry automatically.",
+                        )
                     self.log(f"[sii-client] [{self.environment}] [Step {step}] ERROR: Final SII submission returned an ambiguous response; it will not be retried.")
                     raise SiiException(
                         "SII_FOLIO_OUTCOME_UNKNOWN",
                         "SII final submission returned an ambiguous response. Do not retry automatically.",
                     )
 
-                # Parse the forms in the page
-                forms = self._parse_html_forms(html)
-                self.log(f"[sii-client] [{self.environment}] [Step {step}] Parsed {len(forms)} HTML form(s) on the page.")
-                if not forms:
-                    self.log(f"[sii-client] [{self.environment}] [Step {step}] ERROR: SII returned no recognized wizard form.")
-                    raise SiiException(
-                        "SII_FOLIO_FORM_CHANGED",
-                        "SII returned an unrecognized folio page; no form was submitted.",
-                    )
-
-                # Select best form
-                selected_form = self._pick_form(forms, str(current_resp.url), document_type)
                 if not selected_form:
-                    self.log(f"[sii-client] [{self.environment}] [Step {step}] ERROR: No recognized wizard form matched the current page.")
-                    raise SiiException(
-                        "SII_FOLIO_FORM_CHANGED",
-                        "SII returned an unrecognized folio form; no form was submitted.",
-                    )
+                    if not forms:
+                        self.log(f"[sii-client] [{self.environment}] [Step {step}] ERROR: SII returned no recognized wizard form.")
+                        raise SiiException(
+                            "SII_FOLIO_FORM_CHANGED",
+                            "SII returned an unrecognized folio page; no form was submitted.",
+                        )
+
+                    # Select best form
+                    selected_form = self._pick_form(forms, str(current_resp.url), document_type)
+                    if not selected_form:
+                        self.log(f"[sii-client] [{self.environment}] [Step {step}] ERROR: No recognized wizard form matched the current page.")
+                        raise SiiException(
+                            "SII_FOLIO_FORM_CHANGED",
+                            "SII returned an unrecognized folio form; no form was submitted.",
+                        )
 
                 # Prepare fields for submission
                 fields = dict(selected_form["inputs"])
@@ -619,20 +631,87 @@ class SiiClient:
                 await asyncio.sleep(delay)
 
                 # Submit form
-                if urllib.parse.urlparse(action_url).path == "/cvc_cgi/dte/of_genera_folio":
+                action_path = urllib.parse.urlparse(action_url).path
+                is_final_submission = action_path == "/cvc_cgi/dte/of_genera_folio"
+                if is_final_submission:
                     self.final_submission_started = True
-                if selected_form["method"] == "POST":
-                    current_resp = await client.post(
-                        action_url,
-                        data=fields,
-                        headers={"Referer": str(current_resp.url)},
+                if action_path in POST_AUTHORIZATION_DOWNLOAD_FORM_PATHS:
+                    self.post_authorization_download_started = True
+                disable_redirects = (
+                    is_final_submission
+                    or action_path in POST_AUTHORIZATION_DOWNLOAD_FORM_PATHS
+                )
+                previous_url = str(current_resp.url)
+                try:
+                    if selected_form["method"] == "POST":
+                        current_resp = await client.post(
+                            action_url,
+                            data=fields,
+                            headers={"Referer": previous_url},
+                            follow_redirects=not disable_redirects,
+                        )
+                    else:
+                        current_resp = await client.get(
+                            action_url,
+                            params=fields,
+                            headers={"Referer": previous_url},
+                            follow_redirects=not disable_redirects,
+                        )
+                except httpx.HTTPError as error:
+                    if self.final_submission_started:
+                        self.log(
+                            f"[sii-client] [{self.environment}] [Step {step}] "
+                            f"ERROR: Post-authorization transport failed: {type(error).__name__}."
+                        )
+                        raise SiiException(
+                            "SII_FOLIO_OUTCOME_UNKNOWN",
+                            "SII post-authorization transport failed. Do not retry automatically.",
+                        ) from error
+                    raise
+
+                if is_final_submission and current_resp.status_code in (307, 308):
+                    self.log(
+                        f"[sii-client] [{self.environment}] [Step {step}] "
+                        "ERROR: Final SII submission returned a method-preserving redirect."
                     )
-                else:
-                    current_resp = await client.get(
-                        action_url,
-                        params=fields,
-                        headers={"Referer": str(current_resp.url)},
+                    raise SiiException(
+                        "SII_FOLIO_OUTCOME_UNKNOWN",
+                        "SII final submission returned an unsafe redirect. Do not retry automatically.",
                     )
+
+                if is_final_submission and current_resp.status_code in (301, 302, 303):
+                    location = current_resp.headers.get("location", "")
+                    try:
+                        download_url = urllib.parse.urljoin(action_url, location)
+                    except ValueError:
+                        download_url = ""
+                    if not self._is_safe_post_authorization_download_url(
+                        download_url
+                    ):
+                        self.log(
+                            f"[sii-client] [{self.environment}] [Step {step}] "
+                            "ERROR: Final SII submission returned an unsafe download redirect."
+                        )
+                        raise SiiException(
+                            "SII_FOLIO_OUTCOME_UNKNOWN",
+                            "SII final submission returned an unsafe redirect. Do not retry automatically.",
+                        )
+                    self.post_authorization_download_started = True
+                    try:
+                        current_resp = await client.get(
+                            download_url,
+                            headers={"Referer": action_url},
+                            follow_redirects=False,
+                        )
+                    except httpx.HTTPError as error:
+                        self.log(
+                            f"[sii-client] [{self.environment}] [Step {step}] "
+                            f"ERROR: Post-authorization redirect failed: {type(error).__name__}."
+                        )
+                        raise SiiException(
+                            "SII_FOLIO_OUTCOME_UNKNOWN",
+                            "SII post-authorization transport failed. Do not retry automatically.",
+                        ) from error
 
             # If we reached the step limit without CAF
             self.log(f"[sii-client] [{self.environment}] ERROR: Exceeded step limit (12 steps) without extracting CAF XML.")
@@ -881,3 +960,39 @@ class SiiClient:
                     return f
 
         return None
+
+    def _pick_post_authorization_download_form(
+        self, forms: List[Dict], current_url: str
+    ) -> Optional[Dict]:
+        """Selects one known, same-host CAF download form after authorization."""
+        for form in forms:
+            try:
+                action_url = urllib.parse.urljoin(
+                    current_url, form.get("action") or ""
+                )
+            except ValueError:
+                continue
+            if self._is_safe_post_authorization_download_url(action_url):
+                return form
+        return None
+
+    def _is_safe_post_authorization_download_url(self, url: str) -> bool:
+        """Allows only exact HTTPS-origin CAF download URLs without userinfo."""
+        try:
+            expected = urllib.parse.urlparse(self.base_url)
+            candidate = urllib.parse.urlparse(url)
+            expected_port = expected.port if expected.port is not None else 443
+            candidate_port = (
+                candidate.port if candidate.port is not None else 443
+            )
+        except ValueError:
+            return False
+        return (
+            expected.scheme == "https"
+            and candidate.scheme == expected.scheme
+            and candidate.hostname == expected.hostname
+            and candidate_port == expected_port
+            and candidate.username is None
+            and candidate.password is None
+            and candidate.path in POST_AUTHORIZATION_DOWNLOAD_FORM_PATHS
+        )

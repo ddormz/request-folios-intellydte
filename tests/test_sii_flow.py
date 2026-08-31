@@ -33,6 +33,7 @@ def make_client(handler) -> SiiClient:
     client.last_range_end = None
     client.availability_status = "unknown"
     client.final_submission_started = False
+    client.post_authorization_download_started = False
     client.cert_file = None
     client.key_file = None
 
@@ -172,6 +173,181 @@ def test_success_receipt_without_caf_is_reported_as_unknown_outcome(monkeypatch)
     assert exc_info.value.code == "SII_FOLIO_OUTCOME_UNKNOWN"
     assert client.last_range_start == 25
     assert client.last_range_end == 25
+
+
+def test_success_receipt_follows_known_download_form_once(monkeypatch):
+    async def no_delay(_seconds):
+        return None
+
+    monkeypatch.setattr("src.sii.asyncio.sleep", no_delay)
+    caf = "<AUTORIZACION><CAF><DA><TD>33</TD><RNG><D>25</D><H>25</H></RNG></DA></CAF></AUTORIZACION>"
+    submitted_paths = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/of_solicita_folios"):
+            return confirmation_redirect()
+        if request.method == "POST":
+            submitted_paths.append(request.url.path)
+        if request.url.path.endswith("/of_genera_folio"):
+            receipt_with_download_form = fixture("success_receipt.html") + """
+            <form method="post" action="/cvc_cgi/dte/of_descarga_caf">
+              <input name="TOKEN" value="download-token">
+            </form>
+            """
+            return httpx.Response(200, text=receipt_with_download_form)
+        if request.url.path.endswith("/of_descarga_caf"):
+            return httpx.Response(200, text=caf)
+        return httpx.Response(200, text=fixture("confirmation_unknown_limit.html"))
+
+    client = make_client(handler)
+
+    assert run_request(client, amount=1) == caf
+    assert submitted_paths == [
+        "/cvc_cgi/dte/of_genera_folio",
+        "/cvc_cgi/dte/of_descarga_caf",
+    ]
+
+
+def test_final_generation_307_does_not_repeat_authorization(monkeypatch):
+    async def no_delay(_seconds):
+        return None
+
+    monkeypatch.setattr("src.sii.asyncio.sleep", no_delay)
+    final_posts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal final_posts
+        if request.url.path.endswith("/of_solicita_folios"):
+            return confirmation_redirect()
+        if request.method == "POST" and request.url.path.endswith(
+            "/of_genera_folio"
+        ):
+            final_posts += 1
+            return httpx.Response(
+                307, headers={"Location": "/cvc_cgi/dte/of_genera_folio"}
+            )
+        return httpx.Response(200, text=fixture("confirmation_unknown_limit.html"))
+
+    client = make_client(handler)
+
+    with pytest.raises(SiiException) as exc_info:
+        run_request(client, amount=1)
+
+    assert exc_info.value.code == "SII_FOLIO_OUTCOME_UNKNOWN"
+    assert final_posts == 1
+
+
+def test_final_generation_302_follows_known_download_as_get_once(monkeypatch):
+    async def no_delay(_seconds):
+        return None
+
+    monkeypatch.setattr("src.sii.asyncio.sleep", no_delay)
+    caf = "<AUTORIZACION><CAF><DA><TD>33</TD><RNG><D>25</D><H>25</H></RNG></DA></CAF></AUTORIZACION>"
+    final_posts = 0
+    download_gets = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal final_posts, download_gets
+        if request.url.path.endswith("/of_solicita_folios"):
+            return confirmation_redirect()
+        if request.method == "POST" and request.url.path.endswith(
+            "/of_genera_folio"
+        ):
+            final_posts += 1
+            return httpx.Response(
+                302, headers={"Location": "/cvc_cgi/dte/of_descarga_caf"}
+            )
+        if request.method == "GET" and request.url.path.endswith(
+            "/of_descarga_caf"
+        ):
+            download_gets += 1
+            return httpx.Response(200, text=caf)
+        return httpx.Response(200, text=fixture("confirmation_unknown_limit.html"))
+
+    client = make_client(handler)
+
+    assert run_request(client, amount=1) == caf
+    assert final_posts == 1
+    assert download_gets == 1
+
+
+@pytest.mark.parametrize(
+    "download_action",
+    [
+        "http://maullin.sii.cl/cvc_cgi/dte/of_descarga_caf",
+        "https://maullin.sii.cl:8443/cvc_cgi/dte/of_descarga_caf",
+        "https://maullin.sii.cl:0/cvc_cgi/dte/of_descarga_caf",
+        "https://palena.sii.cl/cvc_cgi/dte/of_descarga_caf",
+        "https://[bad/cvc_cgi/dte/of_descarga_caf",
+        "/cvc_cgi/dte/of_genera_folio",
+    ],
+)
+def test_post_authorization_rejects_unsafe_download_origins(
+    monkeypatch, download_action
+):
+    async def no_delay(_seconds):
+        return None
+
+    monkeypatch.setattr("src.sii.asyncio.sleep", no_delay)
+    submitted_paths = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/of_solicita_folios"):
+            return confirmation_redirect()
+        if request.method == "POST":
+            submitted_paths.append(request.url.path)
+        if request.url.path.endswith("/of_confirma_folio"):
+            return httpx.Response(
+                200, text=fixture("confirmation_unknown_limit.html")
+            )
+        if request.url.path.endswith("/of_genera_folio"):
+            return httpx.Response(
+                200,
+                text=fixture("success_receipt.html")
+                + f'<form method="post" action="{download_action}"></form>',
+            )
+        return httpx.Response(200, text="<html><body>unexpected request</body></html>")
+
+    client = make_client(handler)
+
+    with pytest.raises(SiiException) as exc_info:
+        run_request(client, amount=1)
+
+    assert exc_info.value.code == "SII_FOLIO_OUTCOME_UNKNOWN"
+    assert submitted_paths == ["/cvc_cgi/dte/of_genera_folio"]
+
+
+@pytest.mark.parametrize("failure_path", ["authorization", "download"])
+def test_post_authorization_transport_failure_is_outcome_unknown(
+    monkeypatch, failure_path
+):
+    async def no_delay(_seconds):
+        return None
+
+    monkeypatch.setattr("src.sii.asyncio.sleep", no_delay)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/of_solicita_folios"):
+            return confirmation_redirect()
+        if request.url.path.endswith("/of_genera_folio"):
+            if failure_path == "authorization":
+                raise httpx.ConnectError("connection reset", request=request)
+            return httpx.Response(
+                200,
+                text=fixture("success_receipt.html")
+                + '<form method="post" action="/cvc_cgi/dte/of_descarga_caf"></form>',
+            )
+        if request.url.path.endswith("/of_descarga_caf"):
+            raise httpx.ReadError("download interrupted", request=request)
+        return httpx.Response(200, text=fixture("confirmation_unknown_limit.html"))
+
+    client = make_client(handler)
+
+    with pytest.raises(SiiException) as exc_info:
+        run_request(client, amount=1)
+
+    assert exc_info.value.code == "SII_FOLIO_OUTCOME_UNKNOWN"
+    assert "Do not retry automatically" in exc_info.value.message
 
 
 @pytest.mark.parametrize(

@@ -59,6 +59,11 @@ POST_AUTHORIZATION_DOWNLOAD_FORM_PATHS = [
     "/cvc_cgi/dte/of_descarga_folio",
     "/cvc_cgi/dte/of_descarga_folios",
 ]
+POST_AUTHORIZATION_CONTINUATION_FORM_PATHS = [
+    "/cvc_cgi/dte/of_genera_folio",
+    "/cvc_cgi/dte/of_genera_folios",
+    *POST_AUTHORIZATION_DOWNLOAD_FORM_PATHS,
+]
 
 
 class SiiException(Exception):
@@ -551,10 +556,14 @@ class SiiClient:
                 forms = self._parse_html_forms(html)
                 self.log(f"[sii-client] [{self.environment}] [Step {step}] Parsed {len(forms)} HTML form(s) on the page.")
                 selected_form = None
+                selected_post_authorization_continuation = False
                 if self.final_submission_started and not self.post_authorization_download_started:
                     selected_form = self._pick_post_authorization_download_form(
-                        forms, str(current_resp.url)
+                        forms,
+                        str(current_resp.url),
+                        allow_legacy_generate=is_success_receipt(html),
                     )
+                    selected_post_authorization_continuation = selected_form is not None
 
                 if self.final_submission_started and not selected_form:
                     if is_success_receipt(html):
@@ -632,14 +641,17 @@ class SiiClient:
 
                 # Submit form
                 action_path = urllib.parse.urlparse(action_url).path
-                is_final_submission = action_path == "/cvc_cgi/dte/of_genera_folio"
+                is_final_submission = (
+                    action_path == "/cvc_cgi/dte/of_genera_folio"
+                    and not self.final_submission_started
+                )
                 if is_final_submission:
                     self.final_submission_started = True
-                if action_path in POST_AUTHORIZATION_DOWNLOAD_FORM_PATHS:
+                if selected_post_authorization_continuation:
                     self.post_authorization_download_started = True
                 disable_redirects = (
                     is_final_submission
-                    or action_path in POST_AUTHORIZATION_DOWNLOAD_FORM_PATHS
+                    or selected_post_authorization_continuation
                 )
                 previous_url = str(current_resp.url)
                 try:
@@ -962,9 +974,17 @@ class SiiClient:
         return None
 
     def _pick_post_authorization_download_form(
-        self, forms: List[Dict], current_url: str
+        self,
+        forms: List[Dict],
+        current_url: str,
+        allow_legacy_generate: bool = False,
     ) -> Optional[Dict]:
         """Selects one known, same-host CAF download form after authorization."""
+        allowed_paths = (
+            POST_AUTHORIZATION_CONTINUATION_FORM_PATHS
+            if allow_legacy_generate
+            else POST_AUTHORIZATION_DOWNLOAD_FORM_PATHS
+        )
         for form in forms:
             try:
                 action_url = urllib.parse.urljoin(
@@ -972,11 +992,17 @@ class SiiClient:
                 )
             except ValueError:
                 continue
-            if self._is_safe_post_authorization_download_url(action_url):
+            if self._is_safe_post_authorization_download_url(
+                action_url, allowed_paths
+            ):
                 return form
         return None
 
-    def _is_safe_post_authorization_download_url(self, url: str) -> bool:
+    def _is_safe_post_authorization_download_url(
+        self,
+        url: str,
+        allowed_paths: List[str] = POST_AUTHORIZATION_DOWNLOAD_FORM_PATHS,
+    ) -> bool:
         """Allows only exact HTTPS-origin CAF download URLs without userinfo."""
         try:
             expected = urllib.parse.urlparse(self.base_url)
@@ -994,5 +1020,5 @@ class SiiClient:
             and candidate_port == expected_port
             and candidate.username is None
             and candidate.password is None
-            and candidate.path in POST_AUTHORIZATION_DOWNLOAD_FORM_PATHS
+            and candidate.path in allowed_paths
         )

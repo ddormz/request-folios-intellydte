@@ -208,6 +208,41 @@ def test_success_receipt_follows_known_download_form_once(monkeypatch):
     ]
 
 
+def test_success_receipt_follows_legacy_generate_form_once(monkeypatch):
+    async def no_delay(_seconds):
+        return None
+
+    monkeypatch.setattr("src.sii.asyncio.sleep", no_delay)
+    caf = "<AUTORIZACION><CAF><DA><TD>33</TD><RNG><D>25</D><H>25</H></RNG></DA></CAF></AUTORIZACION>"
+    final_posts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal final_posts
+        if request.url.path.endswith("/of_solicita_folios"):
+            return confirmation_redirect()
+        if request.method == "POST" and request.url.path.endswith(
+            "/of_genera_folio"
+        ):
+            final_posts += 1
+            if final_posts == 1:
+                return httpx.Response(
+                    200,
+                    text=fixture("success_receipt.html")
+                    + """
+                    <form method="post" action="/cvc_cgi/dte/of_genera_folio">
+                      <input name="TOKEN" value="legacy-download-token">
+                    </form>
+                    """,
+                )
+            return httpx.Response(200, text=caf)
+        return httpx.Response(200, text=fixture("confirmation_unknown_limit.html"))
+
+    client = make_client(handler)
+
+    assert run_request(client, amount=1) == caf
+    assert final_posts == 2
+
+
 def test_final_generation_307_does_not_repeat_authorization(monkeypatch):
     async def no_delay(_seconds):
         return None
@@ -279,7 +314,6 @@ def test_final_generation_302_follows_known_download_as_get_once(monkeypatch):
         "https://maullin.sii.cl:0/cvc_cgi/dte/of_descarga_caf",
         "https://palena.sii.cl/cvc_cgi/dte/of_descarga_caf",
         "https://[bad/cvc_cgi/dte/of_descarga_caf",
-        "/cvc_cgi/dte/of_genera_folio",
     ],
 )
 def test_post_authorization_rejects_unsafe_download_origins(

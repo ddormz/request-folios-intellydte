@@ -1,4 +1,5 @@
 import asyncio
+from urllib.parse import parse_qs
 from pathlib import Path
 
 import httpx
@@ -173,6 +174,44 @@ def test_success_receipt_without_caf_is_reported_as_unknown_outcome(monkeypatch)
     assert exc_info.value.code == "SII_FOLIO_OUTCOME_UNKNOWN"
     assert client.last_range_start == 25
     assert client.last_range_end == 25
+
+
+def test_palena_receipt_downloads_authorized_archive(monkeypatch):
+    async def no_delay(_seconds):
+        return None
+
+    monkeypatch.setattr("src.sii.asyncio.sleep", no_delay)
+    calls = []
+    caf = "<AUTORIZACION><CAF><DA><TD>33</TD><RNG><D>36</D><H>36</H></RNG></DA></CAF></AUTORIZACION>"
+
+    def handler(request):
+        calls.append((request.method, request.url.path))
+        if request.url.path.endswith("/of_solicita_folios"):
+            return confirmation_redirect()
+        if request.url.path.endswith("/of_confirma_folio"):
+            return httpx.Response(200, text=fixture("confirmation_unknown_limit.html"))
+        if request.url.path.endswith("/of_genera_folio"):
+            return httpx.Response(200, text=fixture("authorized_archive_download.html"))
+        assert str(request.url) == "https://palena.sii.cl/cvc_cgi/dte/of_genera_archivo"
+        assert request.method == "POST"
+        assert request.headers["referer"] == "https://palena.sii.cl/cvc_cgi/dte/of_genera_folio"
+        assert parse_qs(request.content.decode()) == {
+            "RUT_EMP": ["76123456"], "DV_EMP": ["0"], "COD_DOCTO": ["33"],
+            "FOLIO_INI": ["36"], "FOLIO_FIN": ["36"],
+            "FECHA": ["2026-09-09"], "ACEPTAR": ["AQUI"],
+        }
+        return httpx.Response(200, text=caf)
+
+    client = make_client(handler)
+    client.environment = "palena"
+    client.base_url = "https://palena.sii.cl"
+    assert run_request(client, amount=1) == caf
+    assert calls == [
+        ("GET", "/cvc_cgi/dte/of_solicita_folios"),
+        ("GET", "/cvc_cgi/dte/of_confirma_folio"),
+        ("POST", "/cvc_cgi/dte/of_genera_folio"),
+        ("POST", "/cvc_cgi/dte/of_genera_archivo"),
+    ]
 
 
 def test_success_receipt_follows_known_download_form_once(monkeypatch):

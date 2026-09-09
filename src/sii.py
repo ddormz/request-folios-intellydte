@@ -55,6 +55,8 @@ MAULLIN_DOWNLOAD_FOLIOS_FORM_PATHS = [
     "/cvc_cgi/dte/of_descarga_folios",
 ]
 POST_AUTHORIZATION_DOWNLOAD_FORM_PATHS = [
+    # Actual download action on the SII authorization receipt (Palena).
+    "/cvc_cgi/dte/of_genera_archivo",
     "/cvc_cgi/dte/of_descarga_caf",
     "/cvc_cgi/dte/of_descarga_folio",
     "/cvc_cgi/dte/of_descarga_folios",

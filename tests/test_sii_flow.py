@@ -70,6 +70,44 @@ def run_availability(client: SiiClient) -> dict:
     )
 
 
+@pytest.mark.parametrize("availability", [True, False])
+def test_document_selection_refreshes_limits_without_requesting_numeration(availability):
+    selection = """<form method="POST" action="/cvc_cgi/dte/of_confirma_folio">
+    <input name="RUT_EMP" value="76123456"><input name="DV_EMP" value="0">
+    <select name="COD_DOCTO" onchange="changeRegregion('/cvc_cgi/dte/');">
+    <option value="-1" selected>NINGUNO</option><option value="33">FACTURA</option></select>
+    <input name="CANT_DOCTOS"><input name="ACEPTAR" type="submit" value="Solicitar Numeración">
+    <input name="NEW" type="button" value="Volver"></form>"""
+    posts = []
+
+    def handler(request):
+        if request.url.path.endswith("/of_solicita_folios"):
+            return httpx.Response(302, headers={"Location": "/cvc_cgi/dte/of_solicita_folios_dcto"})
+        assert request.url.path.endswith("/of_solicita_folios_dcto")
+        if request.method == "POST":
+            posts.append(request)
+            fields = parse_qs(request.content.decode(), keep_blank_values=True)
+            assert fields["COD_DOCTO"] == ["33"]
+            assert fields["CANT_DOCTOS"] == [""]
+            assert "ACEPTAR" not in fields and "NEW" not in fields
+            return httpx.Response(200, text=selection.replace("</form>",
+                '<input name="MAX_AUTOR" readonly value="10"><input name="FOLIOS_DISP" readonly value="11"></form>'))
+        return httpx.Response(200, text=selection)
+
+    client = make_client(handler)
+    if availability:
+        info = run_availability(client)
+        assert info["max_authorized"] == 10
+        assert info["unused_folios"] == 11
+    else:
+        with pytest.raises(SiiException) as error:
+            run_request(client, amount=11)
+        assert error.value.code == "SII_FOLIO_AMOUNT_EXCEEDS_MAX_AUTHORIZED"
+        assert client.max_authorized == 10
+    assert len(posts) == 1
+    assert not client.final_submission_started
+
+
 def test_excess_amount_is_rejected_before_final_generation_post():
     final_posts = []
 

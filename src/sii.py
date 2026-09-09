@@ -506,7 +506,13 @@ class SiiClient:
             company_body, company_dv = clean_rut(rut_company)
 
             # 2. Iterate through forms steps to request CAF
+            document_limits_refreshed = False
             for step in range(12):  # Maximum form steps
+                if not document_limits_refreshed:
+                    refreshed = await self._refresh_document_limits(client, current_resp, document_type)
+                    if refreshed is not None:
+                        current_resp = refreshed
+                        document_limits_refreshed = True
                 html = current_resp.text
                 self.log(f"[sii-client] [{self.environment}] [Step {step}] Landed on URL: {trace_safe_url(current_resp.url)}")
 
@@ -555,6 +561,12 @@ class SiiClient:
                     return caf_xml
 
                 # Parse the forms in the page
+                if (not self.final_submission_started and self.max_authorized is not None
+                        and amount > self.max_authorized):
+                    raise SiiException(
+                        "SII_FOLIO_AMOUNT_EXCEEDS_MAX_AUTHORIZED",
+                        f"Requested {amount} folios, but SII authorizes a maximum of {self.max_authorized}.",
+                    )
                 forms = self._parse_html_forms(html)
                 self.log(f"[sii-client] [{self.environment}] [Step {step}] Parsed {len(forms)} HTML form(s) on the page.")
                 selected_form = None
@@ -784,7 +796,13 @@ class SiiClient:
             company_body, company_dv = clean_rut(rut_company)
 
             # 2. Iterate through forms steps to check availability
+            document_limits_refreshed = False
             for step in range(12):  # Maximum form steps
+                if not document_limits_refreshed:
+                    refreshed = await self._refresh_document_limits(client, current_resp, document_type)
+                    if refreshed is not None:
+                        current_resp = refreshed
+                        document_limits_refreshed = True
                 html = current_resp.text
                 self.log(f"[sii-client] [{self.environment}] [Step {step}] Landed on URL: {trace_safe_url(current_resp.url)}")
 
@@ -906,6 +924,37 @@ class SiiClient:
                 "SII_FOLIO_FORM_FLOW_LIMIT",
                 "Exceeded maximum form wizard steps without reaching folio quantity input form.",
             )
+
+    async def _refresh_document_limits(self, client, response, document_type):
+        """Reproduce Palena's document onchange POST without requesting numeration."""
+        if urllib.parse.urlparse(str(response.url)).path != MAULLIN_COMPANY_FORM_PATH:
+            return None
+        soup = BeautifulSoup(response.text, "lxml")
+        selector = soup.find("select", attrs={"name": "COD_DOCTO"})
+        if selector is None or "changeRegregion" not in selector.get("onchange", ""):
+            return None
+        if not selector.find("option", attrs={"value": str(document_type)}):
+            raise SiiException("SII_FOLIO_FORM_CHANGED", "Requested document type is not offered by SII.")
+        form = selector.find_parent("form")
+        if form is None:
+            raise SiiException("SII_FOLIO_FORM_CHANGED", "Document selector has no form.")
+        fields = self._parse_html_forms(str(form))[0]["inputs"]
+        fields["COD_DOCTO"] = str(document_type)
+        fields["CANT_DOCTOS"] = ""
+        # JS form.submit() does not submit the clicked-button value.
+        for button in form.find_all(["input", "button"]):
+            if button.get("type", "").lower() in ("submit", "button", "reset"):
+                fields.pop(button.get("name"), None)
+        self.max_authorized = None
+        self.unused_folios = None
+        self.log(f"[sii-client] [{self.environment}] Refreshing limits for DTE={document_type} via document selection.")
+        refreshed = await client.post(
+            f"{self.base_url}{MAULLIN_COMPANY_FORM_PATH}", data=fields,
+            headers={"Referer": str(response.url)}, follow_redirects=False,
+        )
+        if refreshed.status_code != 200:
+            raise SiiException("SII_FOLIO_AVAILABILITY_UNAVAILABLE", "SII document selection did not return its limits page.")
+        return refreshed
 
     def _parse_html_forms(self, html_content: str) -> List[Dict]:
         """Parses HTML and extracts all form details."""

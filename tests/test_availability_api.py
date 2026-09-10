@@ -35,6 +35,30 @@ class FakeAvailabilityClient:
         pass
 
 
+@pytest.mark.parametrize("failures,code,expected_calls,success", [
+    (1, "SII_FOLIO_CERTIFICATE_AUTH_FAILED", 2, True),
+    (3, "SII_FOLIO_CERTIFICATE_AUTH_FAILED", 2, False),
+    (1, "SII_FOLIO_REQUEST_REJECTED", 1, False),
+])
+def test_availability_auth_retry_is_bounded(monkeypatch, failures, code, expected_calls, success):
+    class AuthClient(FakeAvailabilityClient):
+        calls = 0
+        response = {"max_authorized": 10, "availability_status": "partial"}
+
+        async def check_availability(self, **kwargs):
+            type(self).calls += 1
+            if self.calls <= failures:
+                raise main_module.SiiException(code, "Authentication failed")
+            return self.response
+
+    monkeypatch.setattr(main_module, "SiiClient", AuthClient)
+    response = client.post("/api/v1/folios/check-availability", json=REQUEST_BODY, headers=AUTH_HEADERS)
+    assert response.json()["success"] is success
+    assert AuthClient.calls == expected_calls
+    if not success:
+        assert response.json()["error_code"] == code
+
+
 def test_unknown_availability_is_an_explicit_operational_error(monkeypatch):
     FakeAvailabilityClient.response = {
         "unused_folios": None,

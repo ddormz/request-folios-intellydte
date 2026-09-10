@@ -199,14 +199,24 @@ async def check_availability(request: AvailabilityRequest):
                 environment=request.environment,
             )
             try:
-                info = await asyncio.wait_for(
-                    client.check_availability(
-                        rut_sender=request.rut_sender,
-                        rut_company=request.rut_company,
-                        document_type=request.document_type,
-                    ),
-                    timeout=_remaining_time(deadline),
-                )
+                for attempt in range(2):
+                    try:
+                        info = await asyncio.wait_for(
+                            client.check_availability(
+                                rut_sender=request.rut_sender,
+                                rut_company=request.rut_company,
+                                document_type=request.document_type,
+                            ),
+                            timeout=_remaining_time(deadline),
+                        )
+                        break
+                    except SiiException as error:
+                        if attempt or error.code != "SII_FOLIO_CERTIFICATE_AUTH_FAILED":
+                            raise
+                        # Availability opens a fresh HTTP session on each call.
+                        # Retry only ambiguous authentication, never CAF generation.
+                        client.logs.append("[sii-client] Retrying availability authentication once with a fresh session.")
+                        await asyncio.wait_for(asyncio.sleep(1), timeout=_remaining_time(deadline))
                 # Boletas can reach the quantity form without exposing a numeric
                 # maximum. This is not a failed navigation or an unlimited grant.
                 if info.get("max_authorized") is None and request.document_type not in (39, 41):

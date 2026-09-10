@@ -207,7 +207,9 @@ async def check_availability(request: AvailabilityRequest):
                     ),
                     timeout=_remaining_time(deadline),
                 )
-                if info.get("max_authorized") is None:
+                # Boletas can reach the quantity form without exposing a numeric
+                # maximum. This is not a failed navigation or an unlimited grant.
+                if info.get("max_authorized") is None and request.document_type not in (39, 41):
                     return AvailabilityResponse(
                         success=False,
                         unused_folios=info.get("unused_folios"),

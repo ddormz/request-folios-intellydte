@@ -672,8 +672,8 @@ class SiiClient:
                     if selected_form["method"] == "POST":
                         current_resp = await client.post(
                             action_url,
-                            data=fields,
-                            headers={"Referer": previous_url},
+                            content=self._encode_form_data(fields, current_resp),
+                            headers={"Referer": previous_url, "Content-Type": "application/x-www-form-urlencoded"},
                             follow_redirects=not disable_redirects,
                         )
                     else:
@@ -908,8 +908,8 @@ class SiiClient:
                 if selected_form["method"] == "POST":
                     current_resp = await client.post(
                         action_url,
-                        data=fields,
-                        headers={"Referer": str(current_resp.url)},
+                        content=self._encode_form_data(fields, current_resp),
+                        headers={"Referer": str(current_resp.url), "Content-Type": "application/x-www-form-urlencoded"},
                     )
                 else:
                     current_resp = await client.get(
@@ -938,25 +938,41 @@ class SiiClient:
         form = selector.find_parent("form")
         if form is None:
             raise SiiException("SII_FOLIO_FORM_CHANGED", "Document selector has no form.")
-        fields = self._parse_html_forms(str(form))[0]["inputs"]
+        fields = self._parse_html_forms(str(form), include_submit=False)[0]["inputs"]
         fields["COD_DOCTO"] = str(document_type)
         fields["CANT_DOCTOS"] = ""
-        # JS form.submit() does not submit the clicked-button value.
-        for button in form.find_all(["input", "button"]):
-            if button.get("type", "").lower() in ("submit", "button", "reset"):
-                fields.pop(button.get("name"), None)
         self.max_authorized = None
         self.unused_folios = None
         self.log(f"[sii-client] [{self.environment}] Refreshing limits for DTE={document_type} via document selection.")
         refreshed = await client.post(
-            f"{self.base_url}{MAULLIN_COMPANY_FORM_PATH}", data=fields,
-            headers={"Referer": str(response.url)}, follow_redirects=False,
+            f"{self.base_url}{MAULLIN_COMPANY_FORM_PATH}",
+            content=self._encode_form_data(fields, response),
+            headers={"Referer": str(response.url), "Content-Type": "application/x-www-form-urlencoded"},
+            follow_redirects=False,
         )
         if refreshed.status_code != 200:
             raise SiiException("SII_FOLIO_AVAILABILITY_UNAVAILABLE", "SII document selection did not return its limits page.")
         return refreshed
 
-    def _parse_html_forms(self, html_content: str) -> List[Dict]:
+    @staticmethod
+    def _encode_form_data(fields: Dict[str, str], response: httpx.Response) -> bytes:
+        """Use the source document's charset, as the classic SII browser form does."""
+        encoding = response.charset_encoding
+        if not encoding:
+            soup = BeautifulSoup(response.text, "lxml")
+            meta = soup.find("meta", charset=True)
+            if meta:
+                encoding = meta["charset"]
+            else:
+                meta = soup.find("meta", attrs={"http-equiv": re.compile("^content-type$", re.I)})
+                match = re.search(r"charset\s*=\s*([^\s;]+)", meta.get("content", ""), re.I) if meta else None
+                if match:
+                    encoding = match.group(1).strip("\"'")
+        return urllib.parse.urlencode(
+            fields, encoding=encoding or response.encoding, errors="xmlcharrefreplace"
+        ).encode("ascii")
+
+    def _parse_html_forms(self, html_content: str, include_submit: bool = True) -> List[Dict]:
         """Parses HTML and extracts all form details."""
         soup = BeautifulSoup(html_content, "lxml")
         forms = []
@@ -966,21 +982,42 @@ class SiiClient:
                 "method": form_el.get("method", "GET").upper(),
                 "inputs": {},
             }
-            # Find all inputs, selects, and textareas
-            for input_el in form_el.find_all(["input", "select", "textarea"]):
+            # Submit only successful controls and the forward submit button.
+            controls = form_el.find_all(["input", "select", "textarea", "button"])
+            submitters = [
+                control for control in controls
+                if control.get("type", "submit" if control.name == "button" else "text").lower() == "submit"
+                and not control.has_attr("disabled")
+            ]
+            submitter = next(
+                (control for control in submitters if control.get("name") == "ACEPTAR"),
+                submitters[0] if submitters else None,
+            )
+            for input_el in controls:
                 name = input_el.get("name")
-                if not name:
+                if not name or input_el.has_attr("disabled"):
                     continue
-                value = input_el.get("value", "")
+                input_type = input_el.get("type", "submit" if input_el.name == "button" else "text").lower()
+                if input_type in ("button", "reset", "file", "image"):
+                    continue
+                if input_type == "submit" and (not include_submit or input_el is not submitter):
+                    continue
+                if input_type in ("checkbox", "radio") and not input_el.has_attr("checked"):
+                    continue
+                value = input_el.get("value", "on" if input_type in ("checkbox", "radio") else "")
 
                 if input_el.name == "select":
-                    selected_opt = input_el.find("option", selected=True)
+                    selected_options = input_el.find_all("option", selected=True)
+                    selected_opt = selected_options[-1] if selected_options else None
                     if selected_opt:
                         value = selected_opt.get("value", "")
                     else:
                         first_opt = input_el.find("option")
                         if first_opt:
                             value = first_opt.get("value", "")
+
+                elif input_el.name == "textarea":
+                    value = input_el.get_text()
 
                 form_data["inputs"][name] = value
 

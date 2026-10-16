@@ -81,6 +81,25 @@ seconds), `SII_TIMEOUT` (default `30` seconds per HTTP operation) and
 `SII_OPERATION_TIMEOUT` (default `140` seconds for the total API operation,
 including queue wait).
 
+Wizard POSTs use the source page's charset (ISO-8859-1 on the observed Palena
+pages), rather than always using UTF-8. Only the forward submit button is sent;
+navigation buttons such as `NEW=Volver` are omitted. The document-selection
+refresh uses JavaScript `form.submit()` semantics, with no submit button.
+
+To verify the form transport without contacting SII, start the local Postman
+simulation in one terminal and run the verifier in another:
+
+```powershell
+postman simulation run postman/simulations/sii-forms.sim.yaml --port 4900 --no-history --output ndjson
+venv/Scripts/python.exe -m scripts.verify_sii_simulation
+```
+
+Restart the simulation before each verification run. It models the observed
+Palena forms with synthetic identities, rejects UTF-8 where Latin-1 is expected
+and rejects navigation-button fields. It exercises availability and a single
+CAF request over local HTTP; it does not verify certificate authentication or
+the live SII service. The returned XML is an unsigned test fixture.
+
 ---
 
 ## Dokploy Deployment Guide (Manual Configuration)

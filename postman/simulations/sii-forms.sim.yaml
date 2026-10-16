@@ -1,0 +1,5 @@
+simulation: sii-forms
+routing: header
+mocks:
+  - routeKey: sii
+    path: ../mocks/sii-forms.js
